@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from pathlib import Path
 from typing import Any
 
@@ -214,7 +215,22 @@ class IdavollApp:
             )
 
             messages = self.prompt_builder.build(agent, session, scene_context)
-            content = await self.llm.generate(messages)
+            _t0 = time.monotonic()
+            content = await self.llm.generate(
+                messages,
+                callbacks=session.metadata.get("_langsmith_callbacks"),
+                run_name=session.metadata.get("_langsmith_run_name"),
+                metadata=session.metadata.get("_langsmith_metadata"),
+                tags=session.metadata.get("_langsmith_tags"),
+            )
+            _latency_ms = (time.monotonic() - _t0) * 1000
+            await self.hooks.emit(
+                "llm.generate.after",
+                agent=agent,
+                session=session,
+                latency_ms=_latency_ms,
+                content_length=len(content),
+            )
 
             message = Message(
                 agent_id=agent.id,

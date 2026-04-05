@@ -19,6 +19,9 @@ CORE_HOOKS = frozenset(
         # Handlers may write scene_context into session.metadata["scene_context"]
         # to inject per-turn context (e.g. topic description, debate rules).
         "agent.before_generate",
+        # Fired after each LLM call completes. Payload: agent, session,
+        # latency_ms (float), content_length (int).
+        "llm.generate.after",
     }
 )
 

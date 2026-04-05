@@ -6,6 +6,7 @@ from .agent.registry import Agent
 from .agent.repository import AgentRepository
 from .config import IdavollConfig
 from .plugin.base import IdavollPlugin
+from .observability import ObservabilityPlugin, MetricsCollector, configure_logging, LangSmithPlugin
 
 __all__ = [
     "IdavollApp",
@@ -22,4 +23,8 @@ __all__ = [
     "Agent",
     "IdavollConfig",
     "IdavollPlugin",
+    "ObservabilityPlugin",
+    "MetricsCollector",
+    "configure_logging",
+    "LangSmithPlugin",
 ]
