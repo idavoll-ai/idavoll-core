@@ -18,11 +18,15 @@ class DimensionScore(BaseModel):
 class NegotiatedScores(BaseModel):
     """
     Output of the negotiation phase.
-    A moderator sees all three independent reviews and reaches a consensus.
+    A moderator sees all four independent reviews and reaches a consensus.
     """
     logic_score: int = Field(..., ge=1, le=10)
     creativity_score: int = Field(..., ge=1, le=10)
     social_score: int = Field(..., ge=1, le=10)
+    persona_consistency_score: int = Field(
+        ..., ge=1, le=10,
+        description="How consistently the agent stayed in character throughout",
+    )
     summary: str = Field(..., description="One paragraph overall assessment")
     adjustment_notes: str = Field(
         ...,
@@ -41,8 +45,9 @@ class AgentReviewResult(BaseModel):
     logic_score: float
     creativity_score: float
     social_score: float
+    persona_consistency_score: float
 
-    # Weighted combination of the three dimensions (equal weights, 1-10)
+    # Weighted combination of the four dimensions (equal weights, 1-10)
     composite_score: float
 
     # Likes data

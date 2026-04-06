@@ -51,6 +51,17 @@ class Session:
         self.state = SessionState.OPEN
         self.metadata: dict[str, Any] = metadata or {}
 
+    def add_participant(self, agent) -> None:  # agent: Agent
+        """Dynamically add an agent to an OPEN session."""
+        if self.state != SessionState.OPEN:
+            raise RuntimeError(
+                f"Cannot join session {self.id!r}: state is {self.state!r}. "
+                "Agents may only join while the session is OPEN."
+            )
+        if any(p.id == agent.id for p in self.participants):
+            return  # idempotent
+        self.participants.append(agent)
+
     def add_message(self, message: Message) -> None:
         self.messages.append(message)
         self.context.add(message.agent_id, message.agent_name, message.content)

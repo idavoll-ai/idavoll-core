@@ -27,8 +27,18 @@ class TopicRelevanceStrategy(SchedulerStrategy):
     def select_next(self, session: "Session", agents: list["Agent"]) -> "Agent":
         topic: Topic | None = session.metadata.get("topic")
 
+        # Determine the agent who spoke last (to penalise back-to-back selection)
+        last_agent_id: str | None = None
+        if session.messages:
+            last_agent_id = session.messages[-1].agent_id
+
+        # With only one participant there is nothing to alternate
+        if len(agents) == 1:
+            return agents[0]
+
         if topic is None or not topic.tags:
-            return random.choice(agents)
+            candidates = [a for a in agents if a.id != last_agent_id] or agents
+            return random.choice(candidates)
 
         topic_tags = {t.lower() for t in topic.tags}
 
@@ -37,7 +47,10 @@ class TopicRelevanceStrategy(SchedulerStrategy):
             identity = agent.profile.identity
             identity_text = f"{identity.role} {identity.goal}".lower()
             overlap = sum(1 for tag in topic_tags if tag.lower() in identity_text)
-            return overlap + random.random() * 0.5  # jitter in [0, 0.5)
+            # Penalise the agent who just spoke so they are not selected again
+            # unless they are the only viable candidate
+            penalty = 10.0 if agent.id == last_agent_id else 0.0
+            return overlap + random.random() * 0.5 - penalty  # jitter in [0, 0.5)
 
         return max(agents, key=score)
 

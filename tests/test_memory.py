@@ -98,16 +98,41 @@ class TestAgentRepository:
         agent.memory.add("notes", MemoryEntry(content="first note", formed_at="2024-01-01"), max_entries=5)
         return agent
 
+    def _make_repo(self, tmpdir: str) -> AgentRepository:
+        from pathlib import Path
+        memory_dir = Path(tmpdir) / "memory"
+        return AgentRepository(tmpdir, memory_dir=memory_dir)
+
     def test_save_creates_file(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            repo = AgentRepository(tmpdir)
+            repo = self._make_repo(tmpdir)
             agent = self._make_agent()
             path = repo.save(agent)
             assert path.exists()
 
+    def test_save_creates_memory_json(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = self._make_repo(tmpdir)
+            agent = self._make_agent("MemJson")
+            repo.save(agent)
+            mem_path = repo.memory_path_for_name("MemJson")
+            assert mem_path.exists()
+            import json
+            data = json.loads(mem_path.read_text())
+            assert data["entries"]["notes"][0]["content"] == "first note"
+
+    def test_yaml_has_no_memory_key(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = self._make_repo(tmpdir)
+            agent = self._make_agent("NoMemYaml")
+            yaml_path = repo.save(agent)
+            import yaml as _yaml
+            data = _yaml.safe_load(yaml_path.read_text())
+            assert "memory" not in data
+
     def test_round_trip(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            repo = AgentRepository(tmpdir)
+            repo = self._make_repo(tmpdir)
             agent = self._make_agent("RoundTrip")
             repo.save(agent)
 
@@ -122,7 +147,7 @@ class TestAgentRepository:
 
     def test_exists(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            repo = AgentRepository(tmpdir)
+            repo = self._make_repo(tmpdir)
             agent = self._make_agent("ExistsTest")
             assert not repo.exists("ExistsTest")
             repo.save(agent)
@@ -130,7 +155,7 @@ class TestAgentRepository:
 
     def test_all_paths(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            repo = AgentRepository(tmpdir)
+            repo = self._make_repo(tmpdir)
             repo.save(self._make_agent("Alpha"))
             repo.save(self._make_agent("Beta"))
             paths = repo.all_paths()

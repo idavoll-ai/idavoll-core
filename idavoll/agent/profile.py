@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import re
 import uuid
+from pathlib import Path
 
 from pydantic import BaseModel, Field
 
@@ -60,9 +62,13 @@ class ContextBudget(BaseModel):
         default=512,
         description="预留给模型生成的 tokens，不计入 prompt",
     )
+    memory_context_max: int = Field(
+        default=600,
+        description="记忆上下文（Memory Context）的 token 上限，由 beforeGenerate hook 注入 Section 3",
+    )
     scene_context_max: int = Field(
         default=300,
-        description="场景上下文（Scene Context）的 token 上限，防止插件注入过多",
+        description="场景上下文（Scene Context）的 token 上限，由产品层插件注入 Section 3",
     )
 
     @property
@@ -91,6 +97,42 @@ class AgentProfile(BaseModel):
         default_factory=MemoryPlan,
         description="Agent 自定义的记忆规划——定义想记住哪些类型的事",
     )
+    agents_md_path: str | None = Field(
+        default=None,
+        description=(
+            "指向 Agents.md 的路径。若设置，Section 1（身份层）和 Section 2（表达规则）"
+            "将从该文件读取，而非由 identity/voice 字段动态编译。"
+        ),
+    )
+
+    def load_static_sections(self) -> tuple[str, str] | None:
+        """
+        从 agents_md_path 读取预编译的 Section 1 和 Section 2 文本。
+
+        文件格式须包含：
+            ## Section 1 ...
+            <Section 1 内容>
+            ## Section 2 ...
+            <Section 2 内容>
+
+        返回 (s1, s2)，若路径未设置或文件无法解析则返回 None。
+        """
+        if not self.agents_md_path:
+            return None
+        text = Path(self.agents_md_path).read_text(encoding="utf-8")
+        s1_match = re.search(
+            r"^## Section 1[^\n]*\n(.*?)(?=^## Section 2)", text,
+            re.DOTALL | re.MULTILINE,
+        )
+        s2_match = re.search(
+            r"^## Section 2[^\n]*\n(.*)", text,
+            re.DOTALL | re.MULTILINE,
+        )
+        s1 = s1_match.group(1).strip() if s1_match else ""
+        s2 = s2_match.group(1).strip() if s2_match else ""
+        if not s1 and not s2:
+            return None
+        return s1, s2
 
 
 # ── Subset model used as the LLM's structured output target ───────────────────

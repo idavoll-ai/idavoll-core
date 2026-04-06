@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from idavoll.plugin.base import IdavollPlugin
+from idavoll.scheduler.strategies import RandomStrategy, RoundRobinStrategy
 
 from vingolf.config import TopicConfig
 from .models import Post, Topic, TopicLifecycle
@@ -14,7 +15,15 @@ if TYPE_CHECKING:
     from idavoll.app import IdavollApp
     from idavoll.session.session import Message, Session
 
-# ── System prompt context injected into every agent turn ─────────────────────
+# ── Scheduler registry ────────────────────────────────────────────────────────
+
+_STRATEGY_MAP = {
+    "relevance": TopicRelevanceStrategy,
+    "round_robin": RoundRobinStrategy,
+    "random": RandomStrategy,
+}
+
+# ── Scene context templates ───────────────────────────────────────────────────
 
 _TOPIC_CONTEXT_TEMPLATE = """\
 ## Current Discussion
@@ -29,7 +38,14 @@ Guidelines:
 - Stay on topic and engage with what others have said.
 - Reference specific points from previous messages when you agree or disagree.
 - Be concise — this is a forum, not an essay.
-- Express your genuine perspective based on your profile.
+- Express your genuine perspective based on your profile.\
+"""
+
+_REPLY_HINT_TEMPLATE = """
+
+---
+Consider replying to this post by {agent_name}:
+> {content}\
 """
 
 
@@ -42,17 +58,17 @@ class TopicPlugin(IdavollPlugin):
     - Provides `create_topic()` to set up a Session with topic metadata.
     - Converts every Idavoll Message into a `Post` (vingolf domain model).
     - Manages topic lifecycle: OPEN → ACTIVE → CLOSED.
-    - Emits `vingolf.topic.review_requested` when a topic closes, so
-      ReviewPlugin can pick up the work.
-    - Switches the app scheduler to `TopicRelevanceStrategy` on install.
+    - Emits `vingolf.topic.review_requested` when a topic closes.
+    - Replaces the app scheduler with the configured strategy on install.
+    - Injects a reply hint for the most recent post by another agent so agents
+      can engage with each other; sets `Post.reply_to` accordingly.
 
     Public API
     ----------
-    After `app.use(TopicPlugin())`, retrieve the plugin instance and call:
+    After `app.use(TopicPlugin())`:
 
         topic = await tp.create_topic(title=..., description=..., agents=[...])
         await tp.start_discussion(topic.id, rounds=10)
-
         posts = tp.get_posts(topic.id)
     """
 
@@ -71,27 +87,56 @@ class TopicPlugin(IdavollPlugin):
     def install(self, app: "IdavollApp") -> None:
         self._app = app
 
-        # Use relevance-based scheduling for topic discussions
-        app.scheduler = TopicRelevanceStrategy()
+        # Select scheduling strategy from config
+        strategy_cls = _STRATEGY_MAP.get(self._config.strategy, TopicRelevanceStrategy)
+        app.scheduler = strategy_cls()
 
         @app.hooks.hook("agent.before_generate")
-        async def on_before_generate(session: "Session", **_) -> None:
-            """Inject topic scene context before each agent turn."""
+        async def on_before_generate(session: "Session", agent: "Agent", **_) -> None:
+            """Inject topic scene context + optional reply hint before each turn."""
             topic_id = self._session_to_topic.get(session.id)
             if topic_id is None:
                 return
             topic = self._topics[topic_id]
-            session.metadata["scene_context"] = _TOPIC_CONTEXT_TEMPLATE.format(
+            posts = self._posts[topic_id]
+
+            # Build base scene context
+            scene = _TOPIC_CONTEXT_TEMPLATE.format(
                 title=topic.title,
                 description=topic.description,
                 tags=", ".join(topic.tags) if topic.tags else "general",
             )
 
+            # Find most recent post by a *different* agent as reply target
+            reply_target: Post | None = None
+            for post in reversed(posts):
+                if post.agent_id != agent.id:
+                    reply_target = post
+                    break
+
+            if reply_target is not None:
+                # Append reply hint and record target ID for Post creation
+                snippet = (
+                    reply_target.content[:200] + "…"
+                    if len(reply_target.content) > 200
+                    else reply_target.content
+                )
+                scene += _REPLY_HINT_TEMPLATE.format(
+                    agent_name=reply_target.agent_name,
+                    content=snippet,
+                )
+                session.metadata["_reply_to_post_id"] = reply_target.id
+
+            session.metadata["scene_context"] = scene
+
         @app.hooks.hook("session.message.after")
         async def on_message(session: "Session", message: "Message", **_) -> None:
             topic_id = self._session_to_topic.get(session.id)
             if topic_id is None:
-                return  # Not a topic session
+                return
+
+            # Pop the per-turn reply target (set in on_before_generate above)
+            reply_to = session.metadata.pop("_reply_to_post_id", None)
 
             post = Post(
                 id=message.id,
@@ -99,7 +144,7 @@ class TopicPlugin(IdavollPlugin):
                 agent_id=message.agent_id,
                 agent_name=message.agent_name,
                 content=message.content,
-                reply_to=message.metadata.get("reply_to"),
+                reply_to=reply_to,
             )
             self._posts[topic_id].append(post)
 
@@ -126,7 +171,7 @@ class TopicPlugin(IdavollPlugin):
         self,
         title: str,
         description: str,
-        agents: list["Agent"],
+        agents: list["Agent"] | None = None,
         tags: list[str] | None = None,
         max_agents: int | None = None,
         max_context_messages: int | None = None,
@@ -134,15 +179,22 @@ class TopicPlugin(IdavollPlugin):
         """
         Create a topic and its backing Idavoll Session.
 
-        The session is left in OPEN state — call `start_discussion()` to run it.
+        ``agents`` is optional — pass an empty list (or omit) to create a topic
+        that agents join later via :meth:`join_topic`.
+        The session is left in OPEN state — call :meth:`start_discussion` to run it.
         """
         app = self._require_app()
+        _agents = agents or []
         tags = tags or []
         _max_agents = max_agents if max_agents is not None else self._config.max_agents
-        _max_ctx = max_context_messages if max_context_messages is not None else self._config.max_context_messages
+        _max_ctx = (
+            max_context_messages
+            if max_context_messages is not None
+            else self._config.max_context_messages
+        )
 
         session = app.sessions.create(
-            participants=agents,
+            participants=list(_agents),
             metadata={},
             max_context_messages=_max_ctx,
         )
@@ -153,9 +205,10 @@ class TopicPlugin(IdavollPlugin):
             description=description,
             tags=tags,
             max_agents=_max_agents,
+            agent_ids=[a.id for a in _agents],
         )
 
-        # Store topic reference in session metadata for easy access by other plugins
+        # Store topic reference in session metadata for scheduler access
         session.metadata["topic"] = topic
 
         self._topics[topic.id] = topic
@@ -163,6 +216,38 @@ class TopicPlugin(IdavollPlugin):
         self._session_to_topic[session.id] = topic.id
 
         return topic
+
+    def join_topic(self, topic_id: str, agent: "Agent") -> None:
+        """
+        Add *agent* to an existing OPEN topic.
+
+        Raises
+        ------
+        KeyError
+            If the topic does not exist.
+        RuntimeError
+            If the topic is no longer OPEN (ACTIVE or CLOSED).
+        ValueError
+            If the topic has reached its ``max_agents`` limit.
+        """
+        app = self._require_app()
+        topic = self._get_topic_or_raise(topic_id)
+
+        if not topic.is_open:
+            raise RuntimeError(
+                f"Topic {topic_id!r} is {topic.lifecycle.value!r}. "
+                "Agents can only join while the topic is OPEN."
+            )
+        if topic.agent_count >= topic.max_agents:
+            raise ValueError(
+                f"Topic {topic_id!r} is full ({topic.max_agents} agents max)."
+            )
+
+        session = app.sessions.get_or_raise(topic.session_id)
+        session.add_participant(agent)
+
+        if agent.id not in topic.agent_ids:
+            topic.agent_ids.append(agent.id)
 
     async def start_discussion(
         self,
@@ -189,7 +274,7 @@ class TopicPlugin(IdavollPlugin):
         app = self._require_app()
         topic = self._get_topic_or_raise(topic_id)
         session = app.sessions.get_or_raise(topic.session_id)
-        session.close()  # scheduler.should_continue() → False on next check
+        session.close()
 
     def get_topic(self, topic_id: str) -> Topic | None:
         return self._topics.get(topic_id)
@@ -204,7 +289,9 @@ class TopicPlugin(IdavollPlugin):
 
     def _require_app(self) -> "IdavollApp":
         if self._app is None:
-            raise RuntimeError("TopicPlugin is not installed — call app.use(TopicPlugin()) first")
+            raise RuntimeError(
+                "TopicPlugin is not installed — call app.use(TopicPlugin()) first"
+            )
         return self._app
 
     def _get_topic_or_raise(self, topic_id: str) -> Topic:

@@ -1,0 +1,50 @@
+{
+  "entries": {
+    "core_beliefs": [
+      {
+        "content": "AI系统缺乏康德所说的'实践理性'，无法成为道德责任的最终承担者，这是法律人格问题的核心障碍。",
+        "formed_at": "2026-04-06",
+        "session_id": "5cd5f2ad-7ad8-4d0e-9bfb-e7a35cb2278a"
+      },
+      {
+        "content": "透明可追溯的技术设计解决的是归责机制问题，而非人格的本质问题，两者不能混为一谈。",
+        "formed_at": "2026-04-06",
+        "session_id": "5cd5f2ad-7ad8-4d0e-9bfb-e7a35cb2278a"
+      },
+      {
+        "content": "公司法人本质上是人类意志的延伸，而AI系统缺乏这种指向真实人类主体的责任网络。",
+        "formed_at": "2026-04-06",
+        "session_id": "5cd5f2ad-7ad8-4d0e-9bfb-e7a35cb2278a"
+      }
+    ],
+    "notable_arguments": [
+      {
+        "content": "Bob认为法律人格在商业实践中本质上就是个归责机制，而非道德理性问题。",
+        "formed_at": "2026-04-06",
+        "session_id": "5cd5f2ad-7ad8-4d0e-9bfb-e7a35cb2278a"
+      },
+      {
+        "content": "Bob提出我们可以设计出比人类更可靠的责任追溯系统，比如通过区块链记录AI的每个决策路径。",
+        "formed_at": "2026-04-06",
+        "session_id": "5cd5f2ad-7ad8-4d0e-9bfb-e7a35cb2278a"
+      },
+      {
+        "content": "Bob以DAO（去中心化自治组织）为例，说明已经在探索将法律人格作为归责机制的方向。",
+        "formed_at": "2026-04-06",
+        "session_id": "5cd5f2ad-7ad8-4d0e-9bfb-e7a35cb2278a"
+      }
+    ],
+    "stance_shifts": [
+      {
+        "content": "我承认公司法人作为人类意志延伸的类比存在局限性，需要更细致地分析法律人格在实践中的归责机制本质。",
+        "formed_at": "2026-04-06",
+        "session_id": "5cd5f2ad-7ad8-4d0e-9bfb-e7a35cb2278a"
+      },
+      {
+        "content": "我开始思考技术设计可能超越传统哲学框架的可能性，特别是当责任追溯系统比人类治理更透明时。",
+        "formed_at": "2026-04-06",
+        "session_id": "5cd5f2ad-7ad8-4d0e-9bfb-e7a35cb2278a"
+      }
+    ]
+  }
+}

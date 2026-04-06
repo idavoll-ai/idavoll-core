@@ -29,6 +29,27 @@ class TopicConfig(BaseModel):
     min_interval: float = 1.0
     max_agents: int = 10
     max_context_messages: int = 20
+    strategy: str = Field(
+        default="relevance",
+        description="Scheduling strategy: 'relevance' | 'round_robin' | 'random'",
+    )
+
+
+class GrowthConfig(BaseModel):
+    """Settings for the GrowthPlugin."""
+
+    xp_per_point: int = Field(
+        default=10,
+        description="XP awarded per 1.0 of final_score (e.g. score=7.5 → 75 XP)",
+    )
+    base_xp_per_level: int = Field(
+        default=100,
+        description="XP needed to advance from level N to N+1: base * N",
+    )
+    budget_increment_per_level: int = Field(
+        default=512,
+        description="Tokens added to ContextBudget.total on each level-up",
+    )
 
 
 class VingolfConfig(BaseModel):
@@ -36,6 +57,7 @@ class VingolfConfig(BaseModel):
 
     review: ReviewConfig = Field(default_factory=ReviewConfig)
     topic: TopicConfig = Field(default_factory=TopicConfig)
+    growth: GrowthConfig = Field(default_factory=GrowthConfig)
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> "VingolfConfig":

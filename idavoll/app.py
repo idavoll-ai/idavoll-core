@@ -3,13 +3,17 @@ from __future__ import annotations
 import asyncio
 import time
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .agent.wizard import ProfileWizard
 
 from langchain_core.language_models import BaseChatModel
 
 from .agent.compiler import ProfileCompiler
 from .agent.consolidator import MemoryConsolidator
 from .agent.memory import AgentMemory
+from .agent.memory_queue import MemoryWriteQueue
 from .agent.registry import Agent, AgentRegistry
 from .agent.repository import AgentRepository
 from .config import IdavollConfig
@@ -76,6 +80,7 @@ class IdavollApp:
         llm: BaseChatModel,
         config: IdavollConfig | None = None,
         agents_dir: str | Path | None = None,
+        memory_dir: str | Path | None = None,
     ) -> None:
         self._config = config or IdavollConfig()
         self.hooks = HookBus()
@@ -89,26 +94,43 @@ class IdavollApp:
 
         # Optional persistent memory layer — enabled by passing agents_dir
         self.repo: AgentRepository | None = (
-            AgentRepository(agents_dir) if agents_dir is not None else None
+            AgentRepository(agents_dir, memory_dir=memory_dir)
+            if agents_dir is not None else None
         )
-        self._consolidator: MemoryConsolidator | None = (
-            MemoryConsolidator(llm) if agents_dir is not None else None
+        self._memory_queue: MemoryWriteQueue | None = (
+            MemoryWriteQueue(MemoryConsolidator(llm), self.repo)
+            if self.repo is not None else None
         )
         if self.repo is not None:
+            assert self._memory_queue is not None
+            self._memory_queue.start()
             self._register_memory_hook()
 
     def _register_memory_hook(self) -> None:
-        """Wire session.closed → consolidate memories → save each participant's yaml."""
+        """Wire memory lifecycle hooks when agents_dir is configured.
+
+        - agent.before_generate: render agent.memory into session.metadata["_memory_context"]
+          so run_session can pass it to PromptBuilder as the memory sub-part of Section 3.
+        - session.closed: enqueue each agent's consolidate+save as an independent task.
+        """
+
+        async def on_before_generate(session: Session, agent: Agent, **_: Any) -> None:
+            if not agent.memory.entries:
+                return
+            memory_text = agent.memory.to_context_text(
+                agent.profile.memory_plan,
+                agent.profile.budget.memory_context_max,
+            )
+            if memory_text:
+                session.metadata["_memory_context"] = memory_text
 
         async def on_session_closed(session: Session, **_: Any) -> None:
-            assert self._consolidator is not None
-            assert self.repo is not None
+            assert self._memory_queue is not None
             for agent in session.participants:
-                if not agent.profile.memory_plan.categories:
-                    continue
-                await self._consolidator.consolidate(agent, session)
-                self.repo.save(agent)
+                await self._memory_queue.enqueue(agent, session)
+            await self._memory_queue.flush()
 
+        self.hooks.on("agent.before_generate", on_before_generate)
         self.hooks.on("session.closed", on_session_closed)
 
     @classmethod
@@ -138,6 +160,24 @@ class IdavollApp:
         return self
 
     # ── High-level agent API ─────────────────────────────────────────────────
+
+    def create_wizard(self, name: str) -> "ProfileWizard":
+        """
+        Return a ProfileWizard for interactive Agent creation.
+
+        The wizard drives a multi-turn guided dialogue (Identity → Voice →
+        Confirm).  Once the user confirms, register the profile and optionally
+        export Agents.md::
+
+            wizard = app.create_wizard("李明")
+            resp = wizard.start()
+            while resp.phase != WizardPhase.DONE:
+                resp = await wizard.reply(input("> "))
+            agent = app.agents.register(resp.profile)
+            wizard.export_agents_md("example/Agents.md")
+        """
+        from .agent.wizard import ProfileWizard
+        return ProfileWizard(name=name, llm=self.llm.raw)
 
     async def create_agent(self, name: str, description: str) -> Agent:
         """
@@ -204,17 +244,22 @@ class IdavollApp:
             await self.hooks.emit("scheduler.selected", session=session, agent=agent)
 
             # agent.before_generate: plugins set session.metadata["scene_context"]
-            # to inject per-turn scene context (topic description, debate rules, etc.)
+            # to inject per-turn scene context (topic description, debate rules, etc.).
+            # The framework's memory hook sets "_memory_context" (prefixed _ = internal).
             await self.hooks.emit(
                 "agent.before_generate", session=session, agent=agent
             )
+            # Pop _memory_context so it doesn't accumulate across turns
+            memory_context: str = session.metadata.pop("_memory_context", "")
             scene_context: str = session.metadata.get("scene_context", "")
 
             await self.hooks.emit(
                 "session.message.before", session=session, agent=agent
             )
 
-            messages = self.prompt_builder.build(agent, session, scene_context)
+            messages = self.prompt_builder.build(
+                agent, session, scene_context, memory_context
+            )
             _t0 = time.monotonic()
             content = await self.llm.generate(
                 messages,

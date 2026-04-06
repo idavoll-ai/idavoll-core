@@ -35,6 +35,7 @@ def _default_for_schema(schema: Any) -> Any:
             logic_score=7,
             creativity_score=7,
             social_score=7,
+            persona_consistency_score=7,
             summary="Solid performance.",
             adjustment_notes="No adjustments made.",
         )

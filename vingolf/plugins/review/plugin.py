@@ -96,6 +96,7 @@ class ReviewPlugin(IdavollPlugin):
                     agent_name=agent_posts[0].agent_name,
                     posts=agent_posts,
                     max_likes=max_likes,
+                    profile_text=self._get_profile_text(app, agent_id),
                 )
                 for agent_id, agent_posts in by_agent.items()
             ]
@@ -119,31 +120,41 @@ class ReviewPlugin(IdavollPlugin):
         agent_name: str,
         posts: list[Post],
         max_likes: int,
+        profile_text: str = "",
     ) -> AgentReviewResult:
         posts_text = self._format_posts(posts)
         post_count = len(posts)
 
-        # Phase 1 — independent scoring (parallel)
-        logic, creativity, social = await asyncio.gather(
+        # Phase 1 — four independent reviewers in parallel
+        logic, creativity, social, persona = await asyncio.gather(
             reviewers.score_logic(llm, agent_name, posts_text, post_count),
             reviewers.score_creativity(llm, agent_name, posts_text, post_count),
             reviewers.score_social(llm, agent_name, posts_text, post_count),
+            reviewers.score_persona_consistency(
+                llm, agent_name, posts_text, post_count, profile_text
+            ),
         )
 
-        # Phase 2 — negotiation
-        negotiated = await reviewers.negotiate(llm, agent_name, logic, creativity, social)
+        # Phase 2 — moderator negotiation
+        negotiated = await reviewers.negotiate(
+            llm, agent_name, logic, creativity, social, persona
+        )
 
-        # Phase 3 — final score calculation
+        # Phase 3 — composite = equal-weight average of all 4 dimensions
         composite = (
             negotiated.logic_score
             + negotiated.creativity_score
             + negotiated.social_score
-        ) / 3.0
+            + negotiated.persona_consistency_score
+        ) / 4.0
 
         total_likes = sum(p.likes for p in posts)
         likes_score = self._normalize_likes(total_likes, max_likes)
 
-        final_score = composite * self._config.composite_weight + likes_score * self._config.likes_weight
+        final_score = (
+            composite * self._config.composite_weight
+            + likes_score * self._config.likes_weight
+        )
 
         return AgentReviewResult(
             agent_id=agent_id,
@@ -151,6 +162,7 @@ class ReviewPlugin(IdavollPlugin):
             logic_score=float(negotiated.logic_score),
             creativity_score=float(negotiated.creativity_score),
             social_score=float(negotiated.social_score),
+            persona_consistency_score=float(negotiated.persona_consistency_score),
             composite_score=round(composite, 2),
             likes_count=total_likes,
             likes_score=round(likes_score, 2),
@@ -159,6 +171,24 @@ class ReviewPlugin(IdavollPlugin):
             summary=negotiated.summary,
             adjustment_notes=negotiated.adjustment_notes,
         )
+
+    def _get_profile_text(self, app: "IdavollApp", agent_id: str) -> str:
+        """Compile agent identity into a short text for the persona reviewer."""
+        agent = app.agents.get(agent_id)
+        if agent is None:
+            return ""
+        identity = agent.profile.identity
+        parts = []
+        if identity.role:
+            parts.append(f"Role: {identity.role}")
+        if identity.backstory:
+            parts.append(f"Backstory: {identity.backstory}")
+        if identity.goal:
+            parts.append(f"Goal: {identity.goal}")
+        voice = agent.profile.voice
+        if voice.quirks:
+            parts.append(f"Quirks: {', '.join(voice.quirks)}")
+        return "\n".join(parts)
 
     def _format_posts(self, posts: list[Post]) -> str:
         """

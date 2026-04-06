@@ -24,11 +24,23 @@ class Topic(BaseModel):
     description: str
     tags: list[str] = Field(default_factory=list)
     max_agents: int = 10
+    agent_ids: list[str] = Field(
+        default_factory=list,
+        description="Ordered list of agent IDs who have joined this topic.",
+    )
     lifecycle: TopicLifecycle = TopicLifecycle.OPEN
     created_at: datetime = Field(default_factory=_now)
     closed_at: datetime | None = None
 
     model_config = {"arbitrary_types_allowed": True}
+
+    @property
+    def is_open(self) -> bool:
+        return self.lifecycle == TopicLifecycle.OPEN
+
+    @property
+    def agent_count(self) -> int:
+        return len(self.agent_ids)
 
 
 class Post(BaseModel):
