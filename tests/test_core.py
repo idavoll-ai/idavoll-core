@@ -7,6 +7,7 @@ from idavoll.agent.profile import AgentProfile
 from idavoll.agent.registry import Agent, AgentRegistry
 from idavoll.plugin.hooks import HookBus
 from idavoll.scheduler.strategies import RandomStrategy, RoundRobinStrategy
+from idavoll.session.seat import Seat, SeatState
 from idavoll.session.session import Message, Session, SessionState
 
 
@@ -39,6 +40,56 @@ class TestSession:
         assert len(session.messages) == 5
         # context window only keeps the last 3
         assert len(session.context.get_raw()) == 3
+
+    def test_seats_created_for_initial_participants(self, alice, bob):
+        session = Session(participants=[alice, bob])
+        assert alice.id in session.seats
+        assert bob.id in session.seats
+        assert isinstance(session.seats[alice.id], Seat)
+
+    def test_add_participant_creates_seat(self, alice, bob):
+        session = Session(participants=[alice])
+        session.add_participant(bob)
+        assert bob.id in session.seats
+        assert session.seats[bob.id].agent is bob
+
+    def test_add_participant_allowed_while_active(self, alice, bob):
+        """add_participant no longer enforces OPEN-only; product layer manages this."""
+        session = Session(participants=[alice])
+        session.state = SessionState.ACTIVE
+        session.add_participant(bob)  # must not raise
+        assert bob in session.participants
+
+    def test_add_participant_idempotent(self, alice):
+        session = Session(participants=[alice])
+        session.add_participant(alice)
+        assert session.participants.count(alice) == 1
+        assert len(session.seats) == 1
+
+    def test_seat_local_returns_isolated_dicts(self, alice, bob):
+        session = Session(participants=[alice, bob])
+        session.seat_local(alice.id)["key"] = "alice-value"
+        session.seat_local(bob.id)["key"] = "bob-value"
+        assert session.seat_local(alice.id)["key"] == "alice-value"
+        assert session.seat_local(bob.id)["key"] == "bob-value"
+
+
+# ── Seat ──────────────────────────────────────────────────────────────────────
+
+class TestSeat:
+    def test_initial_state(self, alice):
+        session = Session(participants=[alice])
+        seat = session.seats[alice.id]
+        assert seat.state == SeatState.ACTIVE
+        assert seat.is_schedulable is True
+        assert seat.local_context == {}
+        assert seat.agent is alice
+        assert seat.session_id == session.id
+
+    def test_local_context_is_isolated(self, alice, bob):
+        session = Session(participants=[alice, bob])
+        session.seats[alice.id].local_context["x"] = 1
+        assert "x" not in session.seats[bob.id].local_context
 
 
 # ── AgentRegistry ─────────────────────────────────────────────────────────────

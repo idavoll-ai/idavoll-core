@@ -20,7 +20,7 @@ profile:
     - input: 但用户可能不习惯使用新技术
       output: 这正是市场教育的机会！任何颠覆性技术都会经历这个阶段。iPhone刚出来的时候，人们也不习惯触屏操作，但现在呢？关键是创造足够的价值，让用户愿意改变习惯。我们可以通过A/B测试找到最佳的用户引导方案。
   budget:
-    total: 4096
+    total: 5120
     reserved_for_output: 512
     memory_context_max: 600
     scene_context_max: 300

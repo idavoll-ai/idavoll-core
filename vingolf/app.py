@@ -308,6 +308,7 @@ class VingolfApp:
         tags: list[str] | None = None,
         max_agents: int | None = None,
         max_context_messages: int | None = None,
+        per_agent_max_turns: int | None = None,
     ) -> "Topic":
         """
         Create a forum topic and its backing Idavoll Session.
@@ -340,11 +341,12 @@ class VingolfApp:
             tags=tags,
             max_agents=max_agents,
             max_context_messages=max_context_messages,
+            per_agent_max_turns=per_agent_max_turns,
         )
 
-    def join_topic(self, topic_id: str, agent: "Agent") -> None:
+    async def join_topic(self, topic_id: str, agent: "Agent") -> None:
         """
-        Add *agent* to an OPEN topic.
+        Add *agent* to a topic.
 
         The agent is added to the backing Session's participants list and
         will be selected by the scheduler once :meth:`start_discussion` begins.
@@ -353,19 +355,17 @@ class VingolfApp:
         ------
         KeyError
             Topic not found.
-        RuntimeError
-            Topic is ACTIVE or CLOSED (agents may only join OPEN topics).
         ValueError
             Topic has reached ``max_agents``.
 
         Example::
 
             topic = await app.create_topic("AI debate", "…")
-            app.join_topic(topic.id, alice)
-            app.join_topic(topic.id, bob)
+            await app.join_topic(topic.id, alice)
+            await app.join_topic(topic.id, bob)
             await app.start_discussion(topic.id, rounds=8)
         """
-        self.topic.join_topic(topic_id, agent)
+        await self.topic.join_topic(topic_id, agent)
 
     async def start_discussion(
         self,
@@ -407,6 +407,7 @@ class VingolfApp:
         rounds: int | None = None,
         min_interval: float | None = None,
         max_agents: int | None = None,
+        per_agent_max_turns: int | None = None,
     ) -> tuple["Topic", "TopicReviewSummary | None"]:
         """
         One-shot: create a topic, add agents, run discussion, return results.
@@ -445,9 +446,10 @@ class VingolfApp:
             description=description,
             tags=tags,
             max_agents=max_agents,
+            per_agent_max_turns=per_agent_max_turns,
         )
         for agent in agents:
-            self.join_topic(topic.id, agent)
+            await self.join_topic(topic.id, agent)
         await self.start_discussion(topic.id, rounds=rounds, min_interval=min_interval)
         return topic, self.get_review(topic.id)
 

@@ -21,7 +21,7 @@ from .llm.adapter import LLMAdapter
 from .plugin.base import IdavollPlugin
 from .plugin.hooks import HookBus
 from .prompt.builder import PromptBuilder
-from .scheduler.base import SchedulerStrategy
+from .scheduler.base import SchedulerStrategy  # re-exported for callers
 from .scheduler.strategies import RoundRobinStrategy
 from .session.session import Message, Session, SessionState
 
@@ -37,11 +37,15 @@ class SessionManager:
         participants: list[Agent],
         metadata: dict[str, Any] | None = None,
         max_context_messages: int = 20,
+        scheduler: "SchedulerStrategy | None" = None,
+        per_agent_max_turns: int | None = None,
     ) -> Session:
         session = Session(
             participants=participants,
             metadata=metadata,
             max_context_messages=max_context_messages,
+            scheduler=scheduler,
+            per_agent_max_turns=per_agent_max_turns,
         )
         self._sessions[session.id] = session
         return session
@@ -109,12 +113,16 @@ class IdavollApp:
     def _register_memory_hook(self) -> None:
         """Wire memory lifecycle hooks when agents_dir is configured.
 
-        - agent.before_generate: render agent.memory into session.metadata["_memory_context"]
+        - seat.before_generate: render agent.memory into seat.local_context["_memory_context"]
           so run_session can pass it to PromptBuilder as the memory sub-part of Section 3.
+          Writing to the Seat (not session.metadata) ensures per-agent isolation.
         - session.closed: enqueue each agent's consolidate+save as an independent task.
         """
+        from .session.seat import Seat as _Seat
 
-        async def on_before_generate(session: Session, agent: Agent, **_: Any) -> None:
+        async def on_seat_before_generate(
+            seat: _Seat, agent: Agent, **_: Any
+        ) -> None:
             if not agent.memory.entries:
                 return
             memory_text = agent.memory.to_context_text(
@@ -122,7 +130,7 @@ class IdavollApp:
                 agent.profile.budget.memory_context_max,
             )
             if memory_text:
-                session.metadata["_memory_context"] = memory_text
+                seat.local_context["_memory_context"] = memory_text
 
         async def on_session_closed(session: Session, **_: Any) -> None:
             assert self._memory_queue is not None
@@ -130,7 +138,7 @@ class IdavollApp:
                 await self._memory_queue.enqueue(agent, session)
             await self._memory_queue.flush()
 
-        self.hooks.on("agent.before_generate", on_before_generate)
+        self.hooks.on("seat.before_generate", on_seat_before_generate)
         self.hooks.on("session.closed", on_session_closed)
 
     @classmethod
@@ -208,6 +216,43 @@ class IdavollApp:
         agent = self.agents.register(profile, memory)
         return agent
 
+    # ── Session participant management ───────────────────────────────────────
+
+    async def join_session(self, session: Session, agent: Agent) -> None:
+        """Add *agent* to an active session and emit ``session.agent.joined``.
+
+        Idempotent: calling with an already-active participant is a no-op.
+        If the agent previously left (seat state LEFT) they are re-activated.
+        """
+        session.add_participant(agent)
+        await self.hooks.emit("session.agent.joined", session=session, agent=agent)
+
+    async def leave_session(self, session: Session, agent: Agent) -> None:
+        """Permanently remove *agent* from the session and emit ``session.agent.left``.
+
+        The agent's seat is preserved for history (state → LEFT) but they will
+        never be scheduled again unless they re-join via :meth:`join_session`.
+        """
+        session.remove_participant(agent)
+        await self.hooks.emit("session.agent.left", session=session, agent=agent)
+
+    async def pause_agent(self, session: Session, agent: Agent) -> None:
+        """Temporarily suspend *agent* from being scheduled.
+
+        Emits ``session.agent.paused``.  Call :meth:`resume_agent` to restore.
+        """
+        session.pause_participant(agent)
+        await self.hooks.emit("session.agent.paused", session=session, agent=agent)
+
+    async def resume_agent(self, session: Session, agent: Agent) -> None:
+        """Resume a previously paused *agent* and emit ``session.agent.resumed``.
+
+        If the agent was never added (or has state LEFT) they are treated as a
+        fresh join — equivalent to :meth:`join_session`.
+        """
+        session.resume_participant(agent)
+        await self.hooks.emit("session.agent.resumed", session=session, agent=agent)
+
     # ── Scheduling loop ──────────────────────────────────────────────────────
 
     async def run_session(
@@ -236,22 +281,31 @@ class IdavollApp:
         session.state = SessionState.ACTIVE
         await self.hooks.emit("session.created", session=session)
 
+        # Use the session-level scheduler when set, fall back to app default.
+        _scheduler = session.scheduler or self.scheduler
+
         for _ in range(_rounds):
-            if not self.scheduler.should_continue(session):
+            if not _scheduler.should_continue(session):
                 break
 
-            agent = self.scheduler.select_next(session, session.participants)
+            agent = _scheduler.select_next(session, session.participants)
             await self.hooks.emit("scheduler.selected", session=session, agent=agent)
 
-            # agent.before_generate: plugins set session.metadata["scene_context"]
-            # to inject per-turn scene context (topic description, debate rules, etc.).
-            # The framework's memory hook sets "_memory_context" (prefixed _ = internal).
+            # forum.before_turn: plugins write forum-level shared context into
+            # session.metadata (e.g. topic description, debate rules).
+            await self.hooks.emit("forum.before_turn", session=session, agent=agent)
+
+            # seat.before_generate: plugins write per-agent context into
+            # seat.local_context (e.g. _memory_context, reply hints).
+            # Keeping the contexts in the Seat prevents cross-agent contamination
+            # when multiple agents generate concurrently.
+            _seat = session.seats[agent.id]
             await self.hooks.emit(
-                "agent.before_generate", session=session, agent=agent
+                "seat.before_generate", seat=_seat, session=session, agent=agent
             )
-            # Pop _memory_context so it doesn't accumulate across turns
-            memory_context: str = session.metadata.pop("_memory_context", "")
-            scene_context: str = session.metadata.get("scene_context", "")
+
+            memory_context: str = _seat.local_context.pop("_memory_context", "")
+            scene_context: str = _seat.local_context.get("scene_context", "")
 
             await self.hooks.emit(
                 "session.message.before", session=session, agent=agent
@@ -287,6 +341,17 @@ class IdavollApp:
             await self.hooks.emit(
                 "session.message.after", session=session, message=message
             )
+
+            # Per-agent turn quota: disable seat when the limit is reached.
+            _seat.post_count += 1
+            if _seat.max_turns is not None and _seat.post_count >= _seat.max_turns:
+                session.pause_participant(agent)
+                await self.hooks.emit(
+                    "session.agent.quota_reached",
+                    session=session,
+                    agent=agent,
+                    post_count=_seat.post_count,
+                )
 
             await asyncio.sleep(_interval)
 

@@ -33,6 +33,10 @@ class TopicConfig(BaseModel):
         default="relevance",
         description="Scheduling strategy: 'relevance' | 'round_robin' | 'random'",
     )
+    per_agent_max_turns: int | None = Field(
+        default=None,
+        description="Max times a single agent may speak per topic. None = unlimited.",
+    )
 
 
 class GrowthConfig(BaseModel):

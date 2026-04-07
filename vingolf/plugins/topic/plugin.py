@@ -87,25 +87,29 @@ class TopicPlugin(IdavollPlugin):
     def install(self, app: "IdavollApp") -> None:
         self._app = app
 
-        # Select scheduling strategy from config
-        strategy_cls = _STRATEGY_MAP.get(self._config.strategy, TopicRelevanceStrategy)
-        app.scheduler = strategy_cls()
-
-        @app.hooks.hook("agent.before_generate")
-        async def on_before_generate(session: "Session", agent: "Agent", **_) -> None:
-            """Inject topic scene context + optional reply hint before each turn."""
+        @app.hooks.hook("forum.before_turn")
+        async def on_forum_before_turn(session: "Session", agent: "Agent", **_) -> None:
+            """Write forum-level topic context (shared across all agents) into session.metadata."""
             topic_id = self._session_to_topic.get(session.id)
             if topic_id is None:
                 return
             topic = self._topics[topic_id]
-            posts = self._posts[topic_id]
-
-            # Build base scene context
-            scene = _TOPIC_CONTEXT_TEMPLATE.format(
+            session.metadata["scene_context"] = _TOPIC_CONTEXT_TEMPLATE.format(
                 title=topic.title,
                 description=topic.description,
                 tags=", ".join(topic.tags) if topic.tags else "general",
             )
+
+        @app.hooks.hook("seat.before_generate")
+        async def on_seat_before_generate(seat, session: "Session", agent: "Agent", **_) -> None:
+            """Append per-agent reply hint to the forum scene context and store it in the Seat."""
+            topic_id = self._session_to_topic.get(session.id)
+            if topic_id is None:
+                return
+            posts = self._posts[topic_id]
+
+            # Start from the forum-level base written by on_forum_before_turn
+            base_scene = session.metadata.get("scene_context", "")
 
             # Find most recent post by a *different* agent as reply target
             reply_target: Post | None = None
@@ -115,19 +119,18 @@ class TopicPlugin(IdavollPlugin):
                     break
 
             if reply_target is not None:
-                # Append reply hint and record target ID for Post creation
                 snippet = (
                     reply_target.content[:200] + "…"
                     if len(reply_target.content) > 200
                     else reply_target.content
                 )
-                scene += _REPLY_HINT_TEMPLATE.format(
+                seat.local_context["scene_context"] = base_scene + _REPLY_HINT_TEMPLATE.format(
                     agent_name=reply_target.agent_name,
                     content=snippet,
                 )
-                session.metadata["_reply_to_post_id"] = reply_target.id
-
-            session.metadata["scene_context"] = scene
+                seat.local_context["_reply_to_post_id"] = reply_target.id
+            else:
+                seat.local_context["scene_context"] = base_scene
 
         @app.hooks.hook("session.message.after")
         async def on_message(session: "Session", message: "Message", **_) -> None:
@@ -136,7 +139,7 @@ class TopicPlugin(IdavollPlugin):
                 return
 
             # Pop the per-turn reply target (set in on_before_generate above)
-            reply_to = session.metadata.pop("_reply_to_post_id", None)
+            reply_to = session.seat_local(message.agent_id).pop("_reply_to_post_id", None)
 
             post = Post(
                 id=message.id,
@@ -175,6 +178,7 @@ class TopicPlugin(IdavollPlugin):
         tags: list[str] | None = None,
         max_agents: int | None = None,
         max_context_messages: int | None = None,
+        per_agent_max_turns: int | None = None,
     ) -> Topic:
         """
         Create a topic and its backing Idavoll Session.
@@ -192,11 +196,19 @@ class TopicPlugin(IdavollPlugin):
             if max_context_messages is not None
             else self._config.max_context_messages
         )
+        _per_agent_max = (
+            per_agent_max_turns
+            if per_agent_max_turns is not None
+            else self._config.per_agent_max_turns
+        )
 
+        strategy_cls = _STRATEGY_MAP.get(self._config.strategy, TopicRelevanceStrategy)
         session = app.sessions.create(
             participants=list(_agents),
             metadata={},
             max_context_messages=_max_ctx,
+            scheduler=strategy_cls(),
+            per_agent_max_turns=_per_agent_max,
         )
 
         topic = Topic(
@@ -217,37 +229,74 @@ class TopicPlugin(IdavollPlugin):
 
         return topic
 
-    def join_topic(self, topic_id: str, agent: "Agent") -> None:
+    async def join_topic(self, topic_id: str, agent: "Agent") -> None:
         """
-        Add *agent* to an existing OPEN topic.
+        Add *agent* to an existing topic.
+
+        Works in any lifecycle state (OPEN or ACTIVE).  Joining a CLOSED topic
+        is a no-op — the session is already closed and the agent will never be
+        scheduled.  Emits ``session.agent.joined``.
 
         Raises
         ------
         KeyError
             If the topic does not exist.
-        RuntimeError
-            If the topic is no longer OPEN (ACTIVE or CLOSED).
         ValueError
             If the topic has reached its ``max_agents`` limit.
         """
         app = self._require_app()
         topic = self._get_topic_or_raise(topic_id)
 
-        if not topic.is_open:
+        if topic.lifecycle == TopicLifecycle.CLOSED:
             raise RuntimeError(
-                f"Topic {topic_id!r} is {topic.lifecycle.value!r}. "
-                "Agents can only join while the topic is OPEN."
+                f"Topic {topic_id!r} is CLOSED; agents may only join OPEN or ACTIVE topics."
             )
+
         if topic.agent_count >= topic.max_agents:
             raise ValueError(
                 f"Topic {topic_id!r} is full ({topic.max_agents} agents max)."
             )
 
         session = app.sessions.get_or_raise(topic.session_id)
-        session.add_participant(agent)
+        await app.join_session(session, agent)
 
         if agent.id not in topic.agent_ids:
             topic.agent_ids.append(agent.id)
+
+    async def leave_topic(self, topic_id: str, agent: "Agent") -> None:
+        """
+        Permanently remove *agent* from a topic.
+
+        The agent's seat is preserved for history (state → LEFT) but they will
+        no longer be scheduled.  Emits ``session.agent.left``.
+        """
+        app = self._require_app()
+        topic = self._get_topic_or_raise(topic_id)
+        session = app.sessions.get_or_raise(topic.session_id)
+        await app.leave_session(session, agent)
+
+    async def pause_agent(self, topic_id: str, agent: "Agent") -> None:
+        """
+        Temporarily suspend *agent* from being scheduled in a topic.
+
+        The agent remains registered and can be restored via :meth:`resume_agent`.
+        Emits ``session.agent.paused``.
+        """
+        app = self._require_app()
+        topic = self._get_topic_or_raise(topic_id)
+        session = app.sessions.get_or_raise(topic.session_id)
+        await app.pause_agent(session, agent)
+
+    async def resume_agent(self, topic_id: str, agent: "Agent") -> None:
+        """
+        Resume a previously paused *agent* in a topic.
+
+        Emits ``session.agent.resumed``.
+        """
+        app = self._require_app()
+        topic = self._get_topic_or_raise(topic_id)
+        session = app.sessions.get_or_raise(topic.session_id)
+        await app.resume_agent(session, agent)
 
     async def start_discussion(
         self,

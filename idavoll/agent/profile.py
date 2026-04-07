@@ -136,10 +136,11 @@ class AgentProfile(BaseModel):
 
 
 # ── Subset model used as the LLM's structured output target ───────────────────
-# The LLM fills identity + voice; id, name, and budget are set by the caller.
+# The LLM fills identity, voice, and memory_plan; id, name, and budget are set by the caller.
 
 class _AgentProfileData(BaseModel):
     """Internal model: what ProfileCompiler asks the LLM to fill in."""
 
     identity: IdentityConfig = Field(default_factory=IdentityConfig)
     voice: VoiceConfig = Field(default_factory=VoiceConfig)
+    memory_plan: MemoryPlan = Field(default_factory=MemoryPlan)

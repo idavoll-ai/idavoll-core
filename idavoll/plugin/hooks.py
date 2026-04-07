@@ -16,14 +16,32 @@ CORE_HOOKS = frozenset(
         "session.message.after",
         "scheduler.selected",
         # Fired after scheduler picks the next agent, before PromptBuilder runs.
-        # Handlers may write scene_context into session.metadata["scene_context"]
-        # to inject per-turn context (e.g. topic description, debate rules).
+        # Prefer the two finer-grained hooks below for new code.
         "agent.before_generate",
         "agent.after_generate",
+        # Forum-level hook: fired once per turn before any per-agent setup.
+        # Handlers receive (session, agent) and should write shared context
+        # into session.metadata (e.g. topic description, debate rules).
+        "forum.before_turn",
+        "forum.after_turn",
+        # Seat-level hook: fired per turn, per agent, after forum.before_turn.
+        # Handlers receive (seat, session, agent) and should write per-agent
+        # context into seat.local_context (e.g. _memory_context, reply hints).
+        "seat.before_generate",
+        "seat.after_generate",
         # Fired after each LLM call completes. Payload: agent, session,
         # latency_ms (float), content_length (int).
         "llm.generate.before",
         "llm.generate.after",
+        # Agent lifecycle within a session. Payload: session, agent.
+        # "joined"  — agent was added mid-session (or re-joined after leaving).
+        # "left"    — agent permanently left; seat state → LEFT.
+        # "paused"  — agent temporarily suspended; seat state → PAUSED.
+        # "resumed" — paused agent re-activated; seat state → ACTIVE.
+        "session.agent.joined",
+        "session.agent.left",
+        "session.agent.paused",
+        "session.agent.resumed",
     }
 )
 

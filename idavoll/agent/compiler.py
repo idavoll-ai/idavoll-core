@@ -12,7 +12,7 @@ Your job is to read a natural language description of a desired AI agent and ext
 structured profile from it. Be faithful to the description. Where information is not \
 explicitly given, infer reasonable defaults consistent with the overall character.
 
-The profile has two layers:
+The profile has three layers:
 
 identity  — who the agent IS (stable, rarely changes after creation)
   • role      : one sentence describing who this agent is
@@ -26,6 +26,19 @@ voice     — how the agent SPEAKS (lighter, can be tuned per scene)
   • example_messages : 1-3 realistic exchanges that demonstrate the agent's voice;
                        each has an `input` (what someone says to the agent) and an
                        `output` (how this agent would actually respond)
+
+memory_plan — what the agent REMEMBERS across sessions
+  • categories : 2-4 memory categories tailored to this agent's persona and role.
+                 Each category has:
+                   - name        : snake_case identifier, e.g. core_beliefs
+                   - description : instructs the extractor what to capture, written
+                                   in first person from the agent's perspective,
+                                   e.g. "核心观点：经过讨论后我形成或加深的立场"
+                   - max_entries : how many entries to keep (default 10)
+                 Choose categories that reflect what this specific persona would
+                 naturally want to remember — a debater remembers stance_shifts,
+                 a researcher remembers hypotheses, a policy analyst remembers
+                 regulatory_insights.
 
 Output a JSON object matching the required schema exactly.
 """

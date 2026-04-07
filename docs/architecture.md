@@ -40,6 +40,15 @@ Central orchestrator (`app.py`). Holds all subsystems and exposes the public API
 
 Persistence is opt-in: pass `agents_dir` (and optionally `memory_dir`) to enable it.
 
+**Agent lifecycle methods** (all emit corresponding hook events):
+
+| Method | Hook emitted |
+|---|---|
+| `join_session(session, agent)` | `session.agent.joined` |
+| `leave_session(session, agent)` | `session.agent.left` |
+| `pause_agent(session, agent)` | `session.agent.paused` |
+| `resume_agent(session, agent)` | `session.agent.resumed` |
+
 ---
 
 ### Agent Model
@@ -63,6 +72,56 @@ Agent
 | Budget | `ContextBudget` | Token allocations: total, reserved_for_output, memory_context_max, scene_context_max |
 
 `budget.total` is the primary growth lever — it expands when the agent levels up.
+
+---
+
+### Session Model
+
+**`Session`** (`session/session.py`) — a bounded interaction space for a set of agents.
+
+```
+Session
+├── id:           str
+├── participants: list[Agent]      (schedulable agents)
+├── seats:        dict[agent_id → Seat]
+├── messages:     list[Message]
+├── context:      ContextWindow
+├── state:        SessionState     (OPEN / ACTIVE / CLOSED)
+├── metadata:     dict[str, Any]   (shared plugin state)
+├── scheduler:    SchedulerStrategy | None  (session-level override)
+└── per_agent_max_turns: int | None
+```
+
+Sessions accept new participants at any lifecycle stage (OPEN or ACTIVE). `add_participant` is idempotent — re-joining after LEFT re-activates the existing seat.
+
+---
+
+### Seat Model
+
+**`Seat`** (`session/seat.py`) — an agent's participation handle within a session. Each agent that joins receives a `Seat`. Seats isolate per-agent mutable state so that concurrent agents never share context.
+
+```
+Seat
+├── id:            str
+├── agent:         Agent
+├── session_id:    str
+├── state:         SeatState       (ACTIVE / PAUSED / LEFT)
+├── local_context: dict[str, Any]  (per-agent per-turn context)
+├── joined_at:     datetime (UTC)
+├── is_schedulable: bool
+├── post_count:    int             (turns taken so far)
+└── max_turns:     int | None      (per-agent quota)
+```
+
+**`SeatState`** controls scheduling eligibility:
+
+| State | Scheduled? | Notes |
+|---|---|---|
+| `ACTIVE` | Yes | Normal participation |
+| `PAUSED` | No | Temporarily suspended; can be resumed |
+| `LEFT` | No | Permanently removed; seat kept for history |
+
+Plugins write agent-specific per-turn context (e.g. `_memory_context`, reply hints) into `seat.local_context` rather than `session.metadata` to prevent cross-agent contamination.
 
 ---
 
@@ -155,24 +214,46 @@ Sections 1–2 can be replaced by a pre-compiled static `Agents.md` file (`profi
 
 ### Plugin System
 
-**`HookBus`** (`plugin/hooks.py`) — lightweight async event emitter. Handlers registered with `bus.on(event, fn)` are called concurrently via `asyncio.gather`.
+**`HookBus`** (`plugin/hooks.py`) — lightweight async event emitter. Handlers registered with `bus.on(event, fn)` are called concurrently via `asyncio.gather`. Both async and sync callables are supported. Decorator form: `@bus.hook("event")`.
 
-Plugins communicate through `session.metadata` keys. Convention:
+Plugins communicate through `session.metadata` (shared forum-level state) and `seat.local_context` (per-agent per-turn state). Convention:
 - `_`-prefixed keys are internal framework use (e.g. `_memory_context`)
 - Plugin keys should use a prefix to avoid collisions (e.g. `scene_context`, `_langsmith_callbacks`)
 
 **Core hook events:**
 
-| Hook | Emitted when |
-|---|---|
-| `agent.created` | Agent registered in the registry |
-| `agent.before_generate` | Before prompt assembly each round |
-| `session.created` | Session state transitions to ACTIVE |
-| `session.message.before` | Before LLM is called |
-| `session.message.after` | After message is stored |
-| `session.closed` | Session state transitions to CLOSED |
-| `scheduler.selected` | Scheduler picks the next agent |
-| `llm.generate.after` | LLM response received |
+| Hook | Emitted when | Payload |
+|---|---|---|
+| `agent.created` | Agent registered in the registry | `agent` |
+| `agent.profile.compiled` | ProfileCompiler finishes | `agent` |
+| `session.created` | Session state transitions to ACTIVE | `session` |
+| `session.closed` | Session state transitions to CLOSED | `session` |
+| `session.message.before` | Before LLM is called | `session, agent` |
+| `session.message.after` | After message is stored | `session, message` |
+| `scheduler.selected` | Scheduler picks the next agent | `session, agent` |
+| `forum.before_turn` | Once per turn, before per-agent setup | `session, agent` |
+| `forum.after_turn` | Once per turn, after message stored | `session, agent` |
+| `seat.before_generate` | Per-agent, after forum.before_turn | `seat, session, agent` |
+| `seat.after_generate` | Per-agent, after LLM response | `seat, session, agent` |
+| `agent.before_generate` | (legacy alias) Before prompt assembly | `session, agent` |
+| `agent.after_generate` | (legacy alias) After LLM response | `agent, session` |
+| `llm.generate.before` | Before LLM call | — |
+| `llm.generate.after` | LLM response received | `agent, session, latency_ms, content_length` |
+| `session.agent.joined` | Agent added / re-joined | `session, agent` |
+| `session.agent.left` | Agent permanently left | `session, agent` |
+| `session.agent.paused` | Agent temporarily suspended | `session, agent` |
+| `session.agent.resumed` | Paused agent re-activated | `session, agent` |
+| `session.agent.quota_reached` | Agent hit per-turn quota | `session, agent, post_count` |
+
+**Two-level context injection (forum vs seat):**
+
+```
+forum.before_turn   → write shared context → session.metadata["scene_context"]
+seat.before_generate → write per-agent context → seat.local_context["scene_context"]
+                                                  seat.local_context["_memory_context"]
+```
+
+`forum.before_turn` is the right place for context that applies to all agents (topic description, debate rules). `seat.before_generate` is for agent-specific context (personalized reply hints, per-agent memory).
 
 ---
 
@@ -180,7 +261,7 @@ Plugins communicate through `session.metadata` keys. Convention:
 
 ### VingolfApp
 
-Wraps `IdavollApp` and pre-installs three plugins. All three are accessible as `app.topic`, `app.review`.
+Wraps `IdavollApp` and pre-installs three plugins. All three are accessible as `app.topic`, `app.review`, `app.growth`.
 
 ```python
 app = VingolfApp.from_yaml("config.yaml", agents_dir="data/agents", memory_dir="data/memory")
@@ -193,20 +274,30 @@ topic, summary = await app.run(title="...", description="...", agents=[alice, bo
 
 Wraps sessions as forum topics with a lifecycle: `OPEN → ACTIVE → CLOSED`.
 
-- Replaces the scheduler with `TopicRelevanceStrategy`: selects agents by tag overlap with the topic
+- Uses a per-session scheduler (`TopicRelevanceStrategy` by default, configurable)
 - Converts each `Message` → `Post` (adds post_id, reply_to, likes, score)
-- Injects topic description + reply hint into `session.metadata["scene_context"]` before each turn
+- On `forum.before_turn`: injects shared topic description + tags into `session.metadata["scene_context"]`
+- On `seat.before_generate`: finds most recent post by another agent and appends a per-agent reply hint into `seat.local_context["scene_context"]`; sets `seat.local_context["_reply_to_post_id"]`
 - Emits `vingolf.topic.review_requested` when a topic closes
 
 **Topic lifecycle:**
 ```
 OPEN    ← create_topic(), join_topic()
   ↓
-ACTIVE  ← start_discussion()
+ACTIVE  ← start_discussion()  (also accepts join_topic / pause_agent / resume_agent)
   ↓
 CLOSED  ← all rounds complete (or close_topic())
   → emits vingolf.topic.review_requested
 ```
+
+**Topic agent management API:**
+
+| Method | Behavior |
+|---|---|
+| `join_topic(topic_id, agent)` | Works in OPEN or ACTIVE; raises on CLOSED or full |
+| `leave_topic(topic_id, agent)` | Permanent; seat preserved for history (LEFT) |
+| `pause_agent(topic_id, agent)` | Temporarily suspend; can resume later |
+| `resume_agent(topic_id, agent)` | Re-activate paused agent |
 
 ---
 
@@ -261,33 +352,41 @@ Emits `vingolf.agent.level_up`. **Install order matters**: GrowthPlugin must be 
        → repo.save() → data/agents/{name}.yaml + data/memory/{name}.json
 
 2. TOPIC CREATION  (TopicPlugin)
-   create_topic(title, description, tags)
-       → Session created (OPEN)
+   create_topic(title, description, tags, agents)
+       → Session created (OPEN) with per-session scheduler
        → Topic object ↔ session_id
+       → Each agent receives a Seat in session.seats
 
-3. AGENTS JOIN
+3. AGENTS JOIN  (optional after creation)
    join_topic(topic_id, agent)
-       → session.add_participant(agent)
-       → validates OPEN state + max_agents
+       → session.add_participant(agent)  (any lifecycle state)
+       → emits session.agent.joined
 
 4. DISCUSSION LOOP  (IdavollApp.run_session)
    Session → ACTIVE, emit session.created
 
    for each round:
-       a. scheduler picks agent
-       b. emit agent.before_generate
-              → memory hook:  writes _memory_context from agent.memory
-              → TopicPlugin:  writes scene_context (topic desc + reply hint)
-       c. PromptBuilder.build() → 5-section prompt
-       d. LLMAdapter.generate()
-       e. emit llm.generate.after
-       f. session.add_message(), emit session.message.after
-       g. TopicPlugin: Message → Post
+       a. scheduler picks agent (from schedulable seats)
+       b. emit scheduler.selected
+       c. emit forum.before_turn
+              → TopicPlugin: writes scene_context (topic desc + tags) into session.metadata
+       d. emit seat.before_generate (per-agent)
+              → memory hook:  writes _memory_context into seat.local_context
+              → TopicPlugin:  appends per-agent reply hint into seat.local_context["scene_context"]
+       e. pop _memory_context from seat, read scene_context from seat
+       f. emit session.message.before
+       g. PromptBuilder.build() → 5-section prompt
+       h. LLMAdapter.generate()
+       i. emit llm.generate.after
+       j. session.add_message(), emit session.message.after
+              → TopicPlugin: Message → Post (using _reply_to_post_id from seat)
+       k. increment seat.post_count; pause if quota reached → session.agent.quota_reached
 
 5. SESSION CLOSE
    emit session.closed
        → MemoryWriteQueue enqueues each agent independently
        → background worker: consolidate() + repo.save() per agent
+       → TopicPlugin: marks topic CLOSED, emits vingolf.topic.review_requested
 
 6. REVIEW PIPELINE  (ReviewPlugin)
    receives vingolf.topic.review_requested
@@ -343,6 +442,7 @@ idavoll/
 │   └── strategies.py       # RoundRobin, Random
 ├── session/
 │   ├── session.py          # Session, Message, SessionState
+│   ├── seat.py             # Seat, SeatState — per-agent participation handle
 │   └── context.py          # Token estimation utilities
 └── observability/
     ├── metrics.py           # MetricsCollector

@@ -318,8 +318,8 @@ class TestJoinTopic:
         topic = await topic_plugin.create_topic(title="T", description="D")
         assert topic.agent_count == 0
 
-        topic_plugin.join_topic(topic.id, alice)
-        topic_plugin.join_topic(topic.id, bob)
+        await topic_plugin.join_topic(topic.id, alice)
+        await topic_plugin.join_topic(topic.id, bob)
         assert topic.agent_count == 2
         assert alice.id in topic.agent_ids
         assert bob.id in topic.agent_ids
@@ -337,8 +337,8 @@ class TestJoinTopic:
         alice = await make_agent(app, fake_llm, "Alice")
 
         topic = await topic_plugin.create_topic(title="T", description="D")
-        topic_plugin.join_topic(topic.id, alice)
-        topic_plugin.join_topic(topic.id, alice)  # second join — should be no-op
+        await topic_plugin.join_topic(topic.id, alice)
+        await topic_plugin.join_topic(topic.id, alice)  # second join — should be no-op
 
         assert topic.agent_count == 1
 
@@ -346,8 +346,12 @@ class TestJoinTopic:
         assert len(session.participants) == 1
 
     @pytest.mark.asyncio
-    async def test_join_active_topic_raises(self, fake_llm):
-        """Joining an ACTIVE topic raises RuntimeError."""
+    async def test_join_closed_topic_raises(self, fake_llm):
+        """Joining a CLOSED topic raises RuntimeError at the product layer.
+
+        Session.add_participant no longer enforces OPEN-only; the constraint is
+        now owned by TopicPlugin so that the framework stays policy-free.
+        """
         from vingolf.config import TopicConfig
         topic_plugin = TopicPlugin(config=TopicConfig(default_rounds=1, min_interval=0.0))
         app = make_app(fake_llm)
@@ -358,8 +362,10 @@ class TestJoinTopic:
         topic = await topic_plugin.create_topic(title="T", description="D", agents=[alice])
         await topic_plugin.start_discussion(topic.id)  # now CLOSED
 
+        # TopicPlugin enforces the lifecycle constraint; the error message
+        # says "OPEN" (the required lifecycle state).
         with pytest.raises(RuntimeError, match="OPEN"):
-            topic_plugin.join_topic(topic.id, bob)
+            await topic_plugin.join_topic(topic.id, bob)
 
     @pytest.mark.asyncio
     async def test_join_respects_max_agents(self, fake_llm):
@@ -373,11 +379,11 @@ class TestJoinTopic:
         topic = await topic_plugin.create_topic(
             title="T", description="D", max_agents=2
         )
-        topic_plugin.join_topic(topic.id, agents[0])
-        topic_plugin.join_topic(topic.id, agents[1])
+        await topic_plugin.join_topic(topic.id, agents[0])
+        await topic_plugin.join_topic(topic.id, agents[1])
 
         with pytest.raises(ValueError, match="full"):
-            topic_plugin.join_topic(topic.id, agents[2])
+            await topic_plugin.join_topic(topic.id, agents[2])
 
 
 # ── VingolfApp integration ────────────────────────────────────────────────────
@@ -396,8 +402,8 @@ class TestVingolfApp:
         bob = await vapp.create_agent("Bob", "test")
 
         topic = await vapp.create_topic("T", "D")
-        vapp.join_topic(topic.id, alice)
-        vapp.join_topic(topic.id, bob)
+        await vapp.join_topic(topic.id, alice)
+        await vapp.join_topic(topic.id, bob)
 
         await vapp.start_discussion(topic.id)
 
