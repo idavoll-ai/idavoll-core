@@ -1,33 +1,35 @@
 from __future__ import annotations
 
-import asyncio
-import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
-
-if TYPE_CHECKING:
-    from .agent.wizard import ProfileWizard
+from typing import Any
 
 from langchain_core.language_models import BaseChatModel
 
-from .agent.compiler import ProfileCompiler
-from .agent.consolidator import MemoryConsolidator
-from .agent.memory import AgentMemory
-from .agent.memory_queue import MemoryWriteQueue
+from .agent.profile_service import AgentProfileService
 from .agent.registry import Agent, AgentRegistry
-from .agent.repository import AgentRepository
+from .agent.workspace import ProfileWorkspace, ProfileWorkspaceManager
 from .config import IdavollConfig
 from .llm.adapter import LLMAdapter
+from .memory.builtin import BuiltinMemoryProvider
+from .memory.cognition import GrowthResult, SelfGrowthEngine
+from .memory.manager import MemoryManager
+from .session.compressor import ContextCompressor
+from .session.search import SessionSearch
+from .skills.library import SkillsLibrary
 from .plugin.base import IdavollPlugin
 from .plugin.hooks import HookBus
-from .prompt.builder import PromptBuilder
-from .scheduler.base import SchedulerStrategy  # re-exported for callers
-from .scheduler.strategies import RoundRobinStrategy
-from .session.session import Message, Session, SessionState
+from .prompt.compiler import PromptCompiler
+from .safety.scanner import SafetyScanner
+from .scheduling.scheduler import Scheduler
+from .session.session import Session
+from .tools.registry import ToolRegistry, ToolsetManager
+
+
+JobScheduler = Scheduler
 
 
 class SessionManager:
-    """Creates and tracks all sessions within an IdavollApp instance."""
+    """Owns sessions for the lifetime of an app instance."""
 
     def __init__(self) -> None:
         self._sessions: dict[str, Session] = {}
@@ -37,15 +39,11 @@ class SessionManager:
         participants: list[Agent],
         metadata: dict[str, Any] | None = None,
         max_context_messages: int = 20,
-        scheduler: "SchedulerStrategy | None" = None,
-        per_agent_max_turns: int | None = None,
     ) -> Session:
         session = Session(
             participants=participants,
             metadata=metadata,
             max_context_messages=max_context_messages,
-            scheduler=scheduler,
-            per_agent_max_turns=per_agent_max_turns,
         )
         self._sessions[session.id] = session
         return session
@@ -54,7 +52,7 @@ class SessionManager:
         return self._sessions.get(session_id)
 
     def get_or_raise(self, session_id: str) -> Session:
-        session = self._sessions.get(session_id)
+        session = self.get(session_id)
         if session is None:
             raise KeyError(f"Session {session_id!r} not found")
         return session
@@ -64,20 +62,7 @@ class SessionManager:
 
 
 class IdavollApp:
-    """
-    Top-level application object. Assembles all framework components and
-    exposes them to plugins.
-
-    Typical usage::
-
-        app = IdavollApp(llm=ChatAnthropic(model="claude-sonnet-4-6"))
-        app.use(TopicPlugin())
-        app.use(ReviewPlugin())
-
-        agent = await app.create_agent("Alice", "A curious philosopher...")
-        session = app.sessions.create(participants=[agent])
-        await app.run_session(session, rounds=5)
-    """
+    """Core application object shared by product layers."""
 
     def __init__(
         self,
@@ -86,274 +71,192 @@ class IdavollApp:
         agents_dir: str | Path | None = None,
         memory_dir: str | Path | None = None,
     ) -> None:
+        del agents_dir, memory_dir
+
         self._config = config or IdavollConfig()
         self.hooks = HookBus()
         self.agents = AgentRegistry()
         self.sessions = SessionManager()
+        self.scheduler = Scheduler(
+            max_concurrent_jobs=self._config.scheduler.max_concurrent_jobs,
+            default_cooldown_seconds=self._config.scheduler.default_cooldown_seconds,
+        )
         self.llm = LLMAdapter(llm)
-        self.compiler = ProfileCompiler(llm)
-        self.prompt_builder = PromptBuilder()
-        self.scheduler: SchedulerStrategy = self._config.scheduler.build()
+        self.profile_service = AgentProfileService(self.llm)
+        self.safety_scanner = SafetyScanner()
+        self.tool_registry = ToolRegistry()
+        self.toolsets = ToolsetManager(self.tool_registry)
+        self.prompt_compiler = PromptCompiler(
+            scanner=self.safety_scanner,
+            toolsets=self.toolsets,
+        )
+        self.workspaces = ProfileWorkspaceManager(self._config.workspace.base_dir)
+        self.growth_engine = SelfGrowthEngine(self.llm, self.hooks)
+        self.compressor = ContextCompressor(
+            self.llm, self.hooks, self._config.compression
+        )
         self._plugins: list[IdavollPlugin] = []
-
-        # Optional persistent memory layer — enabled by passing agents_dir
-        self.repo: AgentRepository | None = (
-            AgentRepository(agents_dir, memory_dir=memory_dir)
-            if agents_dir is not None else None
-        )
-        self._memory_queue: MemoryWriteQueue | None = (
-            MemoryWriteQueue(MemoryConsolidator(llm), self.repo)
-            if self.repo is not None else None
-        )
-        if self.repo is not None:
-            assert self._memory_queue is not None
-            self._memory_queue.start()
-            self._register_memory_hook()
-
-    def _register_memory_hook(self) -> None:
-        """Wire memory lifecycle hooks when agents_dir is configured.
-
-        - seat.before_generate: render agent.memory into seat.local_context["_memory_context"]
-          so run_session can pass it to PromptBuilder as the memory sub-part of Section 3.
-          Writing to the Seat (not session.metadata) ensures per-agent isolation.
-        - session.closed: enqueue each agent's consolidate+save as an independent task.
-        """
-        from .session.seat import Seat as _Seat
-
-        async def on_seat_before_generate(
-            seat: _Seat, agent: Agent, **_: Any
-        ) -> None:
-            if not agent.memory.entries:
-                return
-            memory_text = agent.memory.to_context_text(
-                agent.profile.memory_plan,
-                agent.profile.budget.memory_context_max,
-            )
-            if memory_text:
-                seat.local_context["_memory_context"] = memory_text
-
-        async def on_session_closed(session: Session, **_: Any) -> None:
-            assert self._memory_queue is not None
-            for agent in session.participants:
-                await self._memory_queue.enqueue(agent, session)
-            await self._memory_queue.flush()
-
-        self.hooks.on("seat.before_generate", on_seat_before_generate)
-        self.hooks.on("session.closed", on_session_closed)
 
     @classmethod
     def from_config(cls, config: IdavollConfig, api_key: str | None = None) -> "IdavollApp":
-        """
-        Build an IdavollApp entirely from a config object.
-
-        The LLM is constructed via ``config.llm.build(api_key)``.
-        Set *api_key* explicitly or rely on the environment variable
-        expected by the provider (e.g. ``ANTHROPIC_API_KEY``).
-        """
         llm = config.llm.build(api_key=api_key)
         return cls(llm=llm, config=config)
 
-    # ── Plugin management ────────────────────────────────────────────────────
-
     def use(self, plugin: IdavollPlugin) -> "IdavollApp":
-        """Register a plugin. Returns self for chaining: app.use(A()).use(B())."""
         plugin.install(self)
         self._plugins.append(plugin)
         return self
-    
-    def use_all(self, *plugins: IdavollPlugin | list[IdavollPlugin]) -> "IdavollApp":
-        """Register multiple plugins at once."""
-        for plugin in plugins:
-            self.use(plugin)
-        return self
-
-    # ── High-level agent API ─────────────────────────────────────────────────
-
-    def create_wizard(self, name: str) -> "ProfileWizard":
-        """
-        Return a ProfileWizard for interactive Agent creation.
-
-        The wizard drives a multi-turn guided dialogue (Identity → Voice →
-        Confirm).  Once the user confirms, register the profile and optionally
-        export Agents.md::
-
-            wizard = app.create_wizard("李明")
-            resp = wizard.start()
-            while resp.phase != WizardPhase.DONE:
-                resp = await wizard.reply(input("> "))
-            agent = app.agents.register(resp.profile)
-            wizard.export_agents_md("example/Agents.md")
-        """
-        from .agent.wizard import ProfileWizard
-        return ProfileWizard(name=name, llm=self.llm.raw)
 
     async def create_agent(self, name: str, description: str) -> Agent:
-        """
-        Compile a natural language description into an AgentProfile, register
-        the resulting agent, and save its yaml if a repo is configured.
-        """
-        profile = await self.compiler.compile(name, description)
+        profile, soul = await self.profile_service.compile(name, description)
+        workspace = self.workspaces.get_or_create(profile, soul)
+        memory = MemoryManager().add_provider(BuiltinMemoryProvider(workspace))
+        skills = SkillsLibrary(workspace)
+        session_search = SessionSearch(workspace)
         agent = self.agents.register(profile)
-        if self.repo is not None:
-            self.repo.save(agent)
+        agent.workspace = workspace
+        agent.memory = memory
+        agent.skills = skills
+        agent.session_search = session_search
+        agent.tools = self.toolsets.resolve(
+            profile.enabled_toolsets,
+            disabled_tools=profile.disabled_tools,
+        )
         await self.hooks.emit("agent.created", agent=agent)
         return agent
 
-    def load_agent(self, path: str | Path) -> Agent:
-        """
-        Load an agent from an existing yaml file and register it.
-
-        Use this to restore agents with accumulated long-term memory across
-        sessions::
-
-            agent = app.load_agent("agents/professor.yaml")
-        """
-        if self.repo is None:
-            raise RuntimeError(
-                "agents_dir is not configured — pass agents_dir to IdavollApp() to enable persistence."
-            )
-        profile, memory = self.repo.load(path)
-        agent = self.agents.register(profile, memory)
-        return agent
-
-    # ── Session participant management ───────────────────────────────────────
-
-    async def join_session(self, session: Session, agent: Agent) -> None:
-        """Add *agent* to an active session and emit ``session.agent.joined``.
-
-        Idempotent: calling with an already-active participant is a no-op.
-        If the agent previously left (seat state LEFT) they are re-activated.
-        """
-        session.add_participant(agent)
-        await self.hooks.emit("session.agent.joined", session=session, agent=agent)
-
-    async def leave_session(self, session: Session, agent: Agent) -> None:
-        """Permanently remove *agent* from the session and emit ``session.agent.left``.
-
-        The agent's seat is preserved for history (state → LEFT) but they will
-        never be scheduled again unless they re-join via :meth:`join_session`.
-        """
-        session.remove_participant(agent)
-        await self.hooks.emit("session.agent.left", session=session, agent=agent)
-
-    async def pause_agent(self, session: Session, agent: Agent) -> None:
-        """Temporarily suspend *agent* from being scheduled.
-
-        Emits ``session.agent.paused``.  Call :meth:`resume_agent` to restore.
-        """
-        session.pause_participant(agent)
-        await self.hooks.emit("session.agent.paused", session=session, agent=agent)
-
-    async def resume_agent(self, session: Session, agent: Agent) -> None:
-        """Resume a previously paused *agent* and emit ``session.agent.resumed``.
-
-        If the agent was never added (or has state LEFT) they are treated as a
-        fresh join — equivalent to :meth:`join_session`.
-        """
-        session.resume_participant(agent)
-        await self.hooks.emit("session.agent.resumed", session=session, agent=agent)
-
-    # ── Scheduling loop ──────────────────────────────────────────────────────
-
-    async def run_session(
+    async def generate_response(
         self,
-        session: Session,
-        rounds: int | None = None,
-        min_interval: float | None = None,
-    ) -> None:
-        """
-        Drive a session through `rounds` turns of agent speech.
-
-        Each turn:
-          1. Scheduler picks the next agent.
-          2. PromptBuilder assembles the message list.
-          3. Plugins can modify context via `session.message.before`.
-          4. LLM generates a response.
-          5. Message is stored and `session.message.after` is emitted.
-          6. Sleep for `min_interval` seconds before the next turn.
-
-        The loop exits early if the scheduler returns should_continue=False
-        (e.g. when a plugin closes the session via session.close()).
-        """
-        _rounds = rounds if rounds is not None else self._config.session.default_rounds
-        _interval = min_interval if min_interval is not None else self._config.session.min_interval
-
-        session.state = SessionState.ACTIVE
-        await self.hooks.emit("session.created", session=session)
-
-        # Use the session-level scheduler when set, fall back to app default.
-        _scheduler = session.scheduler or self.scheduler
-
-        for _ in range(_rounds):
-            if not _scheduler.should_continue(session):
-                break
-
-            agent = _scheduler.select_next(session, session.participants)
-            await self.hooks.emit("scheduler.selected", session=session, agent=agent)
-
-            # forum.before_turn: plugins write forum-level shared context into
-            # session.metadata (e.g. topic description, debate rules).
-            await self.hooks.emit("forum.before_turn", session=session, agent=agent)
-
-            # seat.before_generate: plugins write per-agent context into
-            # seat.local_context (e.g. _memory_context, reply hints).
-            # Keeping the contexts in the Seat prevents cross-agent contamination
-            # when multiple agents generate concurrently.
-            _seat = session.seats[agent.id]
-            await self.hooks.emit(
-                "seat.before_generate", seat=_seat, session=session, agent=agent
+        agent: Agent,
+        *,
+        session: Session | None = None,
+        scene_context: str = "",
+        memory_context: str = "",
+        current_message: str | None = None,
+        system_message: str = "",
+    ) -> str:
+        # 1. Get or lazily compile the frozen system prompt for this agent.
+        if session is not None:
+            frozen = session.frozen_prompts.get(agent.id)
+            if frozen is None:
+                frozen = self.prompt_compiler.compile_system(
+                    agent, system_message=system_message
+                )
+                session.frozen_prompts[agent.id] = frozen
+        else:
+            frozen = self.prompt_compiler.compile_system(
+                agent, system_message=system_message
             )
 
-            memory_context: str = _seat.local_context.pop("_memory_context", "")
-            scene_context: str = _seat.local_context.get("scene_context", "")
+        # 2. Compress session history if approaching context budget.
+        if session is not None:
+            await self.compressor.maybe_compress(agent, session)
 
-            await self.hooks.emit(
-                "session.message.before", session=session, agent=agent
-            )
-
-            messages = self.prompt_builder.build(
-                agent, session, scene_context, memory_context
-            )
-            _t0 = time.monotonic()
-            content = await self.llm.generate(
-                messages,
-                callbacks=session.metadata.get("_langsmith_callbacks"),
-                run_name=session.metadata.get("_langsmith_run_name"),
-                metadata=session.metadata.get("_langsmith_metadata"),
-                tags=session.metadata.get("_langsmith_tags"),
-            )
-            _latency_ms = (time.monotonic() - _t0) * 1000
-            await self.hooks.emit(
-                "llm.generate.after",
-                agent=agent,
-                session=session,
-                latency_ms=_latency_ms,
-                content_length=len(content),
+        # 3. Auto-fetch memory context if not supplied by the caller.
+        if not memory_context and agent.memory and current_message:
+            memory_context = await agent.memory.prefetch(
+                current_message, scene_context
             )
 
-            message = Message(
-                agent_id=agent.id,
-                agent_name=agent.profile.name,
-                content=content,
-            )
-            session.add_message(message)
-
-            await self.hooks.emit(
-                "session.message.after", session=session, message=message
-            )
-
-            # Per-agent turn quota: disable seat when the limit is reached.
-            _seat.post_count += 1
-            if _seat.max_turns is not None and _seat.post_count >= _seat.max_turns:
-                session.pause_participant(agent)
-                await self.hooks.emit(
-                    "session.agent.quota_reached",
-                    session=session,
-                    agent=agent,
-                    post_count=_seat.post_count,
+        # Auto-append session context (cross-session experience recall).
+        if current_message and agent.session_search:
+            session_ctx = agent.session_search.search(current_message, scene_context)
+            if session_ctx:
+                memory_context = (
+                    (memory_context + "\n\n" + session_ctx)
+                    if memory_context
+                    else session_ctx
                 )
 
-            await asyncio.sleep(_interval)
+        # 4. Build the dynamic turn messages.
+        await self.hooks.emit(
+            "llm.generate.before",
+            agent=agent,
+            session=session,
+            scene_context=scene_context,
+            current_message=current_message,
+        )
+
+        messages = self.prompt_compiler.build_turn(
+            frozen,
+            session,
+            scene_context=scene_context,
+            memory_context=memory_context,
+            current_message=current_message,
+        )
+
+        content = await self.llm.generate(messages)
+
+        await self.hooks.emit(
+            "llm.generate.after",
+            agent=agent,
+            session=session,
+            content=content,
+        )
+
+        # 4. Notify memory providers that this turn is done.
+        if agent.memory and current_message:
+            await agent.memory.sync_turn(current_message, content)
+
+        return content
+
+    def preview_soul(self, agent: Agent) -> str:
+        """Return the current SOUL.md content for the agent.
+
+        This is the text users see between refinement rounds so they can
+        decide what to adjust next.  Returns an empty string when the agent
+        has no workspace (e.g. an agent created without a persistent profile).
+        """
+        if agent.workspace is None:
+            return ""
+        return agent.workspace.read_soul()
+
+    async def refine_soul(self, agent: Agent, feedback: str) -> str:
+        """Refine the agent's SOUL.md based on user feedback and return the updated text.
+
+        Multi-turn creation flow (§8.1 mvp_design.md):
+        ------------------------------------------------
+        Round 1:  ``create_agent(name, description)`` — generates initial SOUL.md
+        Round N:  ``refine_soul(agent, feedback)``    — updates SOUL.md in-place
+
+        The caller should call ``preview_soul(agent)`` after each round to show
+        the user the current state before they provide the next round of feedback.
+
+        On any LLM failure the current soul is preserved and its text is returned
+        unchanged, so a failed round is always safe to retry.
+        """
+        if agent.workspace is None:
+            raise ValueError(
+                f"Agent {agent.name!r} has no workspace; call create_agent() first."
+            )
+        current_text = agent.workspace.read_soul()
+        updated_soul = await self.profile_service.refine(
+            agent.name, current_text, feedback
+        )
+        rendered = ProfileWorkspaceManager.render_soul(agent.profile, updated_soul)
+        agent.workspace.write_soul(rendered)
+        await self.hooks.emit("soul.refined", agent=agent, feedback=feedback)
+        return rendered
+
+    async def close_session(
+        self,
+        session: Session,
+        agents: list[Agent] | None = None,
+    ) -> list[GrowthResult]:
+        """Close a session and run Self-Growth Engine for each agent.
+
+        If *agents* is None, all ``Agent`` instances in
+        ``session.participants`` are used.  Returns one ``GrowthResult``
+        per agent.
+        """
+        if agents is None:
+            agents = [a for a in session.participants if isinstance(a, Agent)]
+
+        results: list[GrowthResult] = []
+        for agent in agents:
+            result = await self.growth_engine.run(agent, session)
+            results.append(result)
 
         session.close()
-        await self.hooks.emit("session.closed", session=session)
+        await self.hooks.emit("session.closed", session=session, results=results)
+        return results

@@ -1,34 +1,37 @@
-from .app import IdavollApp
-from .agent.memory import AgentMemory, MemoryCategory, MemoryEntry, MemoryPlan
-from .agent.profile import AgentProfile, ContextBudget, IdentityConfig, VoiceConfig
-from .agent.profile import ExampleMessage
-from .agent.registry import Agent
-from .agent.repository import AgentRepository
-from .agent.wizard import ProfileWizard, WizardPhase, WizardResponse
-from .config import IdavollConfig
-from .plugin.base import IdavollPlugin
-from .observability import ObservabilityPlugin, MetricsCollector, configure_logging, LangSmithPlugin
+from .agent.workspace import ProfileWorkspace, ProfileWorkspaceManager
+from .app import AgentProfileService, IdavollApp, JobScheduler, SessionManager
+from .config import (
+    CompressionConfig,
+    IdavollConfig,
+    LLMConfig,
+    SchedulerConfig,
+    SessionConfig,
+    WorkspaceConfig,
+)
+from .memory.cognition import GrowthResult, SelfGrowthEngine
+from .memory import BuiltinMemoryProvider, MemoryManager, MemoryProvider
+from .prompt import PromptCompiler
+from .skills import Skill, SkillsLibrary
 
 __all__ = [
+    "AgentProfileService",
+    "BuiltinMemoryProvider",
+    "CompressionConfig",
+    "GrowthResult",
     "IdavollApp",
-    "AgentProfile",
-    "ContextBudget",
-    "IdentityConfig",
-    "VoiceConfig",
-    "ExampleMessage",
-    "AgentMemory",
-    "MemoryPlan",
-    "MemoryCategory",
-    "MemoryEntry",
-    "AgentRepository",
-    "Agent",
-    "ProfileWizard",
-    "WizardPhase",
-    "WizardResponse",
     "IdavollConfig",
-    "IdavollPlugin",
-    "ObservabilityPlugin",
-    "MetricsCollector",
-    "configure_logging",
-    "LangSmithPlugin",
+    "JobScheduler",
+    "LLMConfig",
+    "MemoryManager",
+    "MemoryProvider",
+    "ProfileWorkspace",
+    "ProfileWorkspaceManager",
+    "PromptCompiler",
+    "SchedulerConfig",
+    "SelfGrowthEngine",
+    "SessionConfig",
+    "SessionManager",
+    "Skill",
+    "SkillsLibrary",
+    "WorkspaceConfig",
 ]

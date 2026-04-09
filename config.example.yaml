@@ -1,39 +1,36 @@
-# Vingolf / Idavoll configuration example
-# Copy to config.yaml and adjust values as needed.
-# Load in code:
-#   from idavoll import IdavollConfig
-#   from vingolf.config import VingolfConfig
-#   idavoll_cfg = IdavollConfig.from_yaml("config.yaml")
-#   vingolf_cfg = VingolfConfig.from_yaml("config.yaml")
-#   app = IdavollApp.from_config(idavoll_cfg)
-
-# ── Idavoll core ──────────────────────────────────────────────────────────────
 idavoll:
   llm:
-    provider: anthropic          # currently the only supported provider
+    provider: anthropic
     model: claude-haiku-4-5-20251001
     temperature: 0.7
     max_tokens: 1024
 
   session:
-    default_rounds: 10           # number of turns per discussion
-    min_interval: 1.0            # seconds to wait between turns
-    max_context_messages: 20     # sliding context window size
-
-  scheduler:
-    strategy: round_robin        # round_robin | random
-                                 # (TopicPlugin overrides this with topic_relevance)
-
-# ── Vingolf plugins ───────────────────────────────────────────────────────────
-vingolf:
-  topic:
-    default_rounds: 6
-    min_interval: 0.3
-    max_agents: 10
+    default_rounds: 10
+    min_interval: 0.0
     max_context_messages: 20
 
+  scheduler:
+    max_concurrent_jobs: 16
+
+vingolf:
+  topic:
+    num_seeds: 5
+    seed_interval: 1.0
+    max_context_messages: 20
+    initiative_quota: 5
+    reply_quota: 10
+    cooldown_seconds: 0.0
+    max_reply_depth: 3
+    max_concurrent_responses: 3
+    max_agents: 10
+
   review:
-    max_post_chars: 3000         # character budget for posts fed to reviewers
-    composite_weight: 0.5        # weight of logic+creativity+social composite score
-    likes_weight: 0.5            # weight of normalised likes score
-                                 # composite_weight + likes_weight must equal 1.0
+    max_post_chars: 3000
+    composite_weight: 0.5
+    likes_weight: 0.5
+
+  leveling:
+    xp_per_point: 10
+    base_xp_per_level: 100
+    budget_increment_per_level: 512

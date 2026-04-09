@@ -1,25 +1,40 @@
 from .app import VingolfApp
-from .config import GrowthConfig, ReviewConfig, TopicConfig, VingolfConfig
-from .plugins.growth import GrowthPlugin
-from .plugins.review import ReviewPlugin, AgentReviewResult, TopicReviewSummary
-from .plugins.topic import TopicPlugin, Topic, Post, TopicLifecycle
+from .config import GrowthConfig, LevelingConfig, ReviewConfig, TopicConfig, VingolfConfig
+from .progress import AgentProgress, AgentProgressStore
+from .plugins import (
+    AgentReviewResult,
+    ParticipationDecision,
+    Post,
+    ReviewPlugin,
+    Topic,
+    TopicLifecycle,
+    TopicMembership,
+    TopicParticipationService,
+    TopicPlugin,
+    TopicReviewSummary,
+    GrowthPlugin,
+    LevelingPlugin,
+)
 
 __all__ = [
-    # Top-level app
-    "VingolfApp",
-    # Config
-    "VingolfConfig",
-    "TopicConfig",
-    "ReviewConfig",
-    "GrowthConfig",
-    # Plugins (for advanced users who want manual wiring)
-    "TopicPlugin",
-    "ReviewPlugin",
-    "GrowthPlugin",
-    # Domain models
-    "Topic",
-    "Post",
-    "TopicLifecycle",
     "AgentReviewResult",
+    "AgentProgress",
+    "AgentProgressStore",
+    "GrowthConfig",
+    "GrowthPlugin",
+    "LevelingConfig",
+    "LevelingPlugin",
+    "ParticipationDecision",
+    "Post",
+    "ReviewConfig",
+    "ReviewPlugin",
+    "Topic",
+    "TopicConfig",
+    "TopicLifecycle",
+    "TopicMembership",
+    "TopicParticipationService",
+    "TopicPlugin",
     "TopicReviewSummary",
+    "VingolfApp",
+    "VingolfConfig",
 ]
