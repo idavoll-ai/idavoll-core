@@ -19,6 +19,9 @@ htmlcov/
 # Environment and local config
 .env
 .env.*
+!.env.example
+config.yaml
+!config.example.yaml
 
 # Editor / OS files
 .DS_Store
