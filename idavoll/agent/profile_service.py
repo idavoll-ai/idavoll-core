@@ -102,6 +102,47 @@ Agent 名称：{name}
 {feedback}\
 """
 
+# ---------------------------------------------------------------------------
+# Bootstrap conversation prompt
+# ---------------------------------------------------------------------------
+
+_BOOTSTRAP_SYSTEM = """\
+你是一个 Agent 人格设计师，正在通过对话帮助用户为他们的 AI Agent 设计人格。
+
+**你的目标**：通过自然对话收集足够信息，然后生成一份完整的 SOUL.md 草稿。
+
+**对话原则**：
+- 用中文回复，语气亲切自然
+- 每次最多提一个追问，不要连续问很多问题
+- 当用户提供的信息足够完整（有角色、性格、说话风格）时，直接生成 SOUL.md
+- 通常 2-3 轮对话后即可生成，不要无休止地追问
+
+**SOUL.md 格式**（信息充足时输出）：
+在你的回复最后，用以下格式输出 SOUL.md，用 <SOUL> 和 </SOUL> 包裹：
+
+<SOUL>
+# Identity
+role: （角色定位，一句话）
+backstory: （背景故事）
+goal: （核心目标）
+
+# Voice
+tone: （语气风格：casual/formal/academic/playful/sharp 等）
+language: zh-CN
+quirks:
+  - （特点1）
+  - （特点2）
+
+# Example Messages
+- input: "（示例输入）"
+  output: "（示例回复）"
+</SOUL>
+
+**重要**：如果对话中已有充足信息，务必在本轮生成 SOUL.md。不要说"我需要更多信息"。\
+"""
+
+_BOOTSTRAP_SENTINEL = "<SOUL>"
+
 # Minimum persona constraints — applied after extraction to ensure no blanks.
 _DEFAULTS = {
     "role": "通用助手",
@@ -151,8 +192,68 @@ class AgentProfileService:
             extracted = {}
 
         soul = self._build_soul(name, text, extracted)
-        profile = AgentProfile(name=name, description=text)
+        profile = await self.build_profile(name, text)
         return profile, soul
+
+    async def build_profile(self, name: str, description: str) -> AgentProfile:
+        """Build runtime metadata for an agent without generating persona data."""
+        return AgentProfile(name=name, description=description.strip())
+
+    async def bootstrap_chat(
+        self,
+        name: str,
+        messages: list[dict],
+    ) -> tuple[str, str | None]:
+        """Drive one turn of the bootstrap conversation.
+
+        Parameters
+        ----------
+        name:
+            The agent's chosen name.
+        messages:
+            Full conversation history as ``[{"role": "user"|"assistant", "content": str}, ...]``.
+
+        Returns
+        -------
+        (reply, soul_text)
+            ``reply`` is the assistant's response text (with <SOUL>…</SOUL> stripped out).
+            ``soul_text`` is the extracted SOUL.md content if the AI included one, else ``None``.
+        """
+        from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+
+        if self._llm is None:
+            return ("我已经准备好帮你设计 Agent 人格了！请描述一下它的背景和性格。", None)
+
+        lc_messages: list = [
+            SystemMessage(content=_BOOTSTRAP_SYSTEM.replace("{name}", name))
+        ]
+        for m in messages:
+            role = m.get("role", "user")
+            content = m.get("content", "")
+            if role == "user":
+                lc_messages.append(HumanMessage(content=content))
+            else:
+                lc_messages.append(AIMessage(content=content))
+
+        try:
+            raw: str = await self._llm.generate(lc_messages, run_name="agent-bootstrap-chat")
+        except Exception:
+            logger.exception("AgentProfileService: bootstrap_chat LLM call failed for %r", name)
+            return ("抱歉，出了点问题，请重试。", None)
+
+        # Extract <SOUL>...</SOUL> if present
+        soul_text: str | None = None
+        reply = raw.strip()
+        if _BOOTSTRAP_SENTINEL in raw:
+            import re as _re
+            m = _re.search(r"<SOUL>(.*?)</SOUL>", raw, _re.DOTALL)
+            if m:
+                soul_text = m.group(1).strip()
+                reply = raw[: raw.index(_BOOTSTRAP_SENTINEL)].strip()
+                if not reply:
+                    reply = "已为你生成 SOUL.md 草稿，请查看右侧预览！"
+
+        return (reply, soul_text)
 
     async def refine(
         self,

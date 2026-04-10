@@ -77,13 +77,11 @@ def _require_agent(app, agent_id: str):
 
 @router.post("", response_model=TopicOut, status_code=201)
 async def create_topic(body: CreateTopicRequest) -> TopicOut:
-    """创建话题楼，可选择预置加入的 Agent 列表。"""
+    """创建话题楼。Agent 需通过各自的 join 接口主动加入。"""
     app = state.get_app()
-    agents = [_require_agent(app, aid) for aid in body.agent_ids]
     topic = await app.create_topic(
         title=body.title,
         description=body.description,
-        agents=agents or None,
         tags=body.tags or None,
     )
     return _topic_out(topic)

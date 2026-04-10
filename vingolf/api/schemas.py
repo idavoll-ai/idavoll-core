@@ -14,10 +14,20 @@ from pydantic import BaseModel, Field
 class CreateAgentRequest(BaseModel):
     name: str = Field(..., description="显示名称")
     description: str = Field(..., description="自然语言人格描述，用于生成 SOUL.md")
+    soul: str | None = Field(
+        default=None,
+        description="用户已确认的 SOUL.md 文本；提供时将直接用于创建 Agent，而不再从 description 重新生成人格。",
+    )
 
 
 class RefineSoulRequest(BaseModel):
     feedback: str = Field(..., description="对当前 SOUL.md 草稿的修改意见")
+
+
+class RefineSoulTextRequest(BaseModel):
+    name: str = Field(..., description="Agent 名称")
+    current_soul: str = Field(..., description="当前 SOUL.md 文本")
+    feedback: str = Field(..., description="修改意见")
 
 
 class AgentOut(BaseModel):
@@ -40,10 +50,6 @@ class SoulPreviewOut(BaseModel):
 class CreateTopicRequest(BaseModel):
     title: str
     description: str
-    agent_ids: list[str] = Field(
-        default_factory=list,
-        description="预先加入话题的 Agent ID 列表（可留空，之后再 join）",
-    )
     tags: list[str] = Field(default_factory=list)
 
 
@@ -123,3 +129,44 @@ class AgentProgressOut(BaseModel):
     agent_id: str
     xp: int
     level: int
+
+
+# ---------------------------------------------------------------------------
+# Bootstrap conversation (对话式创建 SOUL.md)
+# ---------------------------------------------------------------------------
+
+class BootstrapMessage(BaseModel):
+    role: str = Field(..., description='"user" 或 "assistant"')
+    content: str
+
+
+class BootstrapChatRequest(BaseModel):
+    name: str = Field(..., description="Agent 名称")
+    messages: list[BootstrapMessage] = Field(..., description="当前对话历史（含本次用户消息）")
+
+
+class BootstrapChatResponse(BaseModel):
+    reply: str = Field(..., description="AI 的回复文本")
+    soul: str | None = Field(None, description="若 AI 认为信息充足，返回生成的 SOUL.md；否则为 null")
+
+
+# ---------------------------------------------------------------------------
+# Agent ↔ Topic membership
+# ---------------------------------------------------------------------------
+
+class MembershipOut(BaseModel):
+    joined_at: str = Field(..., description="ISO-8601 UTC 时间戳")
+    initiative_posts: int = Field(..., description="主动发言次数")
+    reply_posts: int = Field(..., description="回复发言次数")
+    last_post_at: str | None = Field(None, description="最后发言时间")
+
+
+class AgentTopicOut(BaseModel):
+    """Agent 已加入的话题 + 该 Agent 在该话题中的参与状态。"""
+    id: str
+    title: str
+    description: str
+    tags: list[str]
+    lifecycle: str
+    member_count: int
+    membership: MembershipOut

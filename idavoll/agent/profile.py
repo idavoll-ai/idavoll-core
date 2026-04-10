@@ -82,11 +82,17 @@ class SoulParseError(ValueError):
 def parse_soul_markdown(text: str) -> SoulSpec:
     """Parse SOUL.md markdown into a structured SoulSpec.
 
-    Expected shape:
+    Supported shapes:
 
+    Canonical shape:
     - ``## Identity`` section with ``Role / Backstory / Goal`` bullets
     - ``## Voice`` section with ``Tone / Language / Quirks`` bullets
     - optional ``## Examples`` section with one or more example blocks
+
+    Bootstrap shape:
+    - ``# Identity`` section with ``role: / backstory: / goal:``
+    - ``# Voice`` section with ``tone: / language: / quirks:``
+    - optional ``# Example Messages`` section with ``- input / output`` pairs
 
     The parser is intentionally tolerant of minor formatting differences so
     user-edited SOUL files can still be consumed without requiring exact
@@ -102,8 +108,8 @@ def parse_soul_markdown(text: str) -> SoulSpec:
     if "voice" not in sections:
         raise SoulParseError("SOUL.md is missing a '## Voice' section.")
 
-    identity_fields = _parse_labeled_bullets(sections["identity"])
-    voice_fields = _parse_labeled_bullets(sections["voice"])
+    identity_fields = _parse_section_fields(sections["identity"])
+    voice_fields = _parse_section_fields(sections["voice"])
 
     identity = IdentityConfig(
         role=_as_text(identity_fields.get("role")),
@@ -114,7 +120,9 @@ def parse_soul_markdown(text: str) -> SoulSpec:
         tone=_as_text(voice_fields.get("tone"), default="casual"),
         language=_as_text(voice_fields.get("language"), default="zh-CN"),
         quirks=_parse_quirks(voice_fields.get("quirks")),
-        example_messages=_parse_examples(sections.get("examples", "")),
+        example_messages=_parse_examples(
+            sections.get("examples", "") or sections.get("example messages", "")
+        ),
     )
     return SoulSpec(identity=identity, voice=voice)
 
@@ -150,7 +158,7 @@ def _split_markdown_sections(text: str) -> dict[str, str]:
     buffer: list[str] = []
 
     for line in text.splitlines():
-        match = re.match(r"^##\s+(.+?)\s*$", line.strip())
+        match = re.match(r"^#{1,2}\s+(.+?)\s*$", line.strip())
         if match:
             if current is not None:
                 sections[current] = "\n".join(buffer).strip()
@@ -163,6 +171,14 @@ def _split_markdown_sections(text: str) -> dict[str, str]:
     if current is not None:
         sections[current] = "\n".join(buffer).strip()
     return sections
+
+
+def _parse_section_fields(section: str) -> dict[str, str | list[str]]:
+    """Parse either labeled bullets or yaml-like key/value lines."""
+    values = _parse_labeled_bullets(section)
+    if values:
+        return values
+    return _parse_key_value_block(section)
 
 
 def _parse_labeled_bullets(section: str) -> dict[str, str | list[str]]:
@@ -196,6 +212,37 @@ def _parse_labeled_bullets(section: str) -> dict[str, str | list[str]]:
     return values
 
 
+def _parse_key_value_block(section: str) -> dict[str, str | list[str]]:
+    values: dict[str, str | list[str]] = {}
+    lines = section.splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        match = re.match(r'^\s*-?\s*([A-Za-z][A-Za-z0-9 _-]*)\s*:\s*(.*?)\s*$', line)
+        if not match:
+            i += 1
+            continue
+
+        label = match.group(1).strip().lower()
+        value = match.group(2).strip().strip('"')
+        if value:
+            values[label] = value
+            i += 1
+            continue
+
+        nested: list[str] = []
+        j = i + 1
+        while j < len(lines):
+            nested_match = re.match(r'^\s*-\s+"?(.*?)"?\s*$', lines[j])
+            if not nested_match:
+                break
+            nested.append(nested_match.group(1).strip())
+            j += 1
+        values[label] = nested
+        i = j
+    return values
+
+
 def _parse_quirks(value: str | list[str] | None) -> list[str]:
     if value is None:
         return []
@@ -216,6 +263,7 @@ def _parse_examples(section: str) -> list[ExampleMessage]:
     blocks: list[list[str]] = []
     current: list[str] = []
     saw_heading = False
+    has_explicit_input = False
 
     for line in section.splitlines():
         if re.match(r"^###\s+", line.strip()):
@@ -224,16 +272,23 @@ def _parse_examples(section: str) -> list[ExampleMessage]:
                 blocks.append(current)
                 current = []
             continue
+        if re.match(r'^\s*-\s*input\s*:\s*', line, re.IGNORECASE):
+            has_explicit_input = True
+            if current:
+                blocks.append(current)
+                current = []
         current.append(line)
 
     if current:
         blocks.append(current)
     if not saw_heading:
-        blocks = [section.splitlines()]
+        if not has_explicit_input:
+            blocks = [section.splitlines()]
 
     results: list[ExampleMessage] = []
     for block in blocks:
-        fields = _parse_labeled_bullets("\n".join(block))
+        block_text = "\n".join(block)
+        fields = _parse_section_fields(block_text)
         input_text = _as_text(fields.get("input"))
         output_text = _as_text(fields.get("output"))
         if input_text and output_text:

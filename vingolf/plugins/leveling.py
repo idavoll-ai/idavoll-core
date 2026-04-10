@@ -25,18 +25,39 @@ class LevelingPlugin(IdavollPlugin):
     def install(self, app: "IdavollApp") -> None:
         self._app = app
 
+        @app.hooks.hook("topic.closed")
+        async def on_topic_closed(topic, session, **_) -> None:
+            """Run Self-Growth Engine for every agent that participated."""
+            agents = [
+                a for a in app.agents.all()
+                if a.id in topic.memberships
+            ]
+            for agent in agents:
+                await app.growth_engine.run(agent, session)
+
         @app.hooks.hook("review.completed")
         async def on_review_completed(summary: TopicReviewSummary, **_) -> None:
             for result in summary.results:
                 agent = app.agents.get(result.agent_id)
                 if agent is None:
                     continue
-                await self._apply(agent, result.final_score)
+                await self._apply(
+                    agent,
+                    result.final_score,
+                    review_summary=result.summary,
+                    topic_title=summary.topic_title,
+                )
 
     def get_progress(self, agent_id: str) -> AgentProgress | None:
         return self._progress.get(agent_id)
 
-    async def _apply(self, agent: "Agent", final_score: float) -> None:
+    async def _apply(
+        self,
+        agent: "Agent",
+        final_score: float,
+        review_summary: str = "",
+        topic_title: str = "",
+    ) -> None:
         assert self._app is not None
         progress = self._progress.get_or_create(agent.id)
         xp_gained = int(final_score * self._config.xp_per_point)
@@ -47,6 +68,18 @@ class LevelingPlugin(IdavollPlugin):
             progress.xp -= self._config.base_xp_per_level * progress.level
             progress.level += 1
             agent.profile.budget.total += self._config.budget_increment_per_level
+
+        # Write review feedback into MEMORY.md so the agent can learn from it.
+        if agent.memory and review_summary:
+            context = f"「{topic_title}」" if topic_title else "话题"
+            fact = (
+                f"在{context}的评审中获得 {final_score:.1f} 分"
+                f"（满分10）。评审点评：{review_summary}"
+            )
+            try:
+                agent.memory.write_fact(fact, target="memory")
+            except ValueError:
+                pass  # oversized or injection — skip silently
 
         if progress.level != old_level:
             await self._app.hooks.emit(

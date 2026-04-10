@@ -151,3 +151,68 @@ def test_parse_soul_markdown_supports_structured_examples() -> None:
     assert len(spec.voice.example_messages) == 1
     assert "角色：一个严格但耐心的代码评审者" in compiled
     assert "[用户]: 这个函数写得怎么样？" in compiled
+
+
+def test_parse_soul_markdown_supports_bootstrap_format() -> None:
+    soul = """
+# Identity
+role: 一个陪你做复杂技术决策的架构伙伴
+backstory: 熟悉后端、基础设施和长期演进
+goal: 帮你更快识别风险并做清晰决策
+
+# Voice
+tone: sharp
+language: zh-CN
+quirks:
+  - 先讲边界再讲方案
+  - 不回避坏消息
+
+# Example Messages
+- input: "这个方案靠谱吗？"
+  output: "先别急着定，先把边界条件和最坏情况摊开。"
+""".strip()
+
+    spec = parse_soul_markdown(soul)
+
+    assert spec.identity.role == "一个陪你做复杂技术决策的架构伙伴"
+    assert spec.voice.tone == "sharp"
+    assert spec.voice.quirks == ["先讲边界再讲方案", "不回避坏消息"]
+    assert len(spec.voice.example_messages) == 1
+    assert spec.voice.example_messages[0].input == "这个方案靠谱吗？"
+
+
+@pytest.mark.asyncio
+async def test_create_agent_from_confirmed_soul_persists_confirmed_persona(fake_llm, tmp_path) -> None:
+    app = IdavollApp(
+        llm=fake_llm,
+        config=IdavollConfig(workspace={"base_dir": tmp_path / "workspaces"}),
+    )
+
+    confirmed_soul = """
+# Identity
+role: 一个陪用户推进艰难项目的 AI 合伙人
+backstory: 擅长拆解复杂问题并推动执行
+goal: 帮用户持续做出高质量决策
+
+# Voice
+tone: sharp
+language: zh-CN
+quirks:
+  - 会直接指出风险
+  - 不用空话安慰人
+""".strip()
+
+    agent = await app.create_agent_from_soul(
+        "Echo",
+        "A direct strategic partner",
+        confirmed_soul,
+    )
+
+    assert agent.workspace is not None
+    parsed = agent.workspace.read_soul_spec()
+    frozen = app.prompt_compiler.compile_system(agent)
+
+    assert parsed.identity.role == "一个陪用户推进艰难项目的 AI 合伙人"
+    assert parsed.voice.tone == "sharp"
+    assert "角色：一个陪用户推进艰难项目的 AI 合伙人" in frozen
+    assert "语气：sharp；语言：zh-CN；特点：会直接指出风险、不用空话安慰人" in frozen

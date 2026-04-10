@@ -1,6 +1,12 @@
 from __future__ import annotations
 
+import importlib
+import importlib.util
+import inspect
+import pkgutil
 from dataclasses import dataclass, field
+from pathlib import Path
+from types import ModuleType
 from typing import Any, Callable
 
 
@@ -175,3 +181,121 @@ class ToolsetManager:
         for spec in tools:
             lines.append(f"- **{spec.name}**: {spec.description}")
         return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# @tool decorator
+# ---------------------------------------------------------------------------
+
+_TOOL_ATTR = "__tool_spec__"
+
+
+def tool(
+    name: str | None = None,
+    *,
+    description: str = "",
+    parameters: dict[str, Any] | None = None,
+    tags: list[str] | None = None,
+) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    """Decorator that marks a function as an auto-registerable tool.
+
+    Usage::
+
+        @tool(description="Search the web for a query.")
+        def web_search(query: str) -> str:
+            ...
+
+        @tool()
+        def my_tool(x: int) -> str:
+            \"\"\"First docstring line becomes the description.\"\"\"
+            ...
+
+    The decorated function is returned unchanged; the ``ToolSpec`` is stored
+    as ``fn.__tool_spec__`` so ``ToolRegistry.scan_module()`` can pick it up.
+    """
+
+    def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
+        resolved_name = name or fn.__name__
+        resolved_desc = description
+        if not resolved_desc:
+            doc = (fn.__doc__ or "").strip()
+            resolved_desc = doc.splitlines()[0] if doc else resolved_name
+        setattr(
+            fn,
+            _TOOL_ATTR,
+            ToolSpec(
+                name=resolved_name,
+                description=resolved_desc,
+                parameters=parameters or {},
+                fn=fn,
+                tags=list(tags or []),
+            ),
+        )
+        return fn
+
+    return decorator
+
+
+# ---------------------------------------------------------------------------
+# Auto-scan helpers (added to ToolRegistry via monkey-style extension below)
+# ---------------------------------------------------------------------------
+
+
+def _scan_module(registry: ToolRegistry, module: ModuleType) -> int:
+    """Register all @tool-decorated functions found in *module*.
+
+    Returns the number of tools registered.
+    """
+    count = 0
+    for _attr_name, obj in inspect.getmembers(module, inspect.isfunction):
+        spec: ToolSpec | None = getattr(obj, _TOOL_ATTR, None)
+        if spec is not None:
+            registry.register(spec)
+            count += 1
+    return count
+
+
+def _scan_package(registry: ToolRegistry, package: ModuleType | str | Path) -> int:
+    """Recursively scan a package and register all @tool-decorated functions.
+
+    *package* can be:
+    - a module object (already imported)
+    - a dotted package name string (e.g. ``"myapp.tools"``)
+    - a filesystem ``Path`` pointing to a package directory
+
+    Returns the total number of tools registered across all sub-modules.
+    """
+    if isinstance(package, Path):
+        # Import by file path
+        pkg_path = package
+        pkg_name = pkg_path.name
+        spec_obj = importlib.util.spec_from_file_location(
+            pkg_name, pkg_path / "__init__.py"
+        )
+        if spec_obj is None or spec_obj.loader is None:
+            raise ImportError(f"Cannot import package from path: {pkg_path}")
+        mod = importlib.util.module_from_spec(spec_obj)
+        spec_obj.loader.exec_module(mod)  # type: ignore[union-attr]
+        package = mod
+    elif isinstance(package, str):
+        package = importlib.import_module(package)
+
+    total = _scan_module(registry, package)
+    pkg_path_list = getattr(package, "__path__", None)
+    if pkg_path_list is None:
+        return total  # plain module, not a package
+
+    for module_info in pkgutil.walk_packages(
+        pkg_path_list, prefix=package.__name__ + "."
+    ):
+        try:
+            sub = importlib.import_module(module_info.name)
+        except ImportError:
+            continue
+        total += _scan_module(registry, sub)
+    return total
+
+
+# Attach scan helpers as methods on ToolRegistry
+ToolRegistry.scan_module = _scan_module  # type: ignore[method-assign]
+ToolRegistry.scan_package = _scan_package  # type: ignore[method-assign]

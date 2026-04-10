@@ -120,6 +120,20 @@ class VingolfApp:
     async def create_agent(self, name: str, description: str) -> "Agent":
         return await self._app.create_agent(name, description)
 
+    async def create_agent_from_soul(
+        self,
+        name: str,
+        description: str,
+        soul: str,
+    ) -> "Agent":
+        return await self._app.create_agent_from_soul(name, description, soul)
+
+    async def bootstrap_chat(
+        self, name: str, messages: list[dict]
+    ) -> tuple[str, str | None]:
+        """One turn of the bootstrap conversation. Returns (reply, soul_text|None)."""
+        return await self._app.profile_service.bootstrap_chat(name, messages)
+
     def preview_soul(self, agent: "Agent") -> str:
         """Return the current SOUL.md text so the user can decide what to refine next."""
         return self._app.preview_soul(agent)
@@ -212,3 +226,12 @@ class VingolfApp:
     def get_progress(self, agent_id: str) -> "AgentProgress | None":
         assert self.leveling is not None
         return self.leveling.get_progress(agent_id)
+
+    def get_agent_topics(self, agent_id: str) -> "list[tuple[Topic, object]]":
+        """返回该 Agent 已加入的所有话题及其 TopicMembership。"""
+        assert self.topic is not None
+        result = []
+        for topic in self.topic.all_topics():
+            if agent_id in topic.memberships:
+                result.append((topic, topic.memberships[agent_id]))
+        return result
