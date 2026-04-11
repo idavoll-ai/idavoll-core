@@ -8,7 +8,10 @@ from .config import (
     SessionConfig,
     WorkspaceConfig,
 )
-from .memory.cognition import GrowthResult, SelfGrowthEngine
+from .memory.cognition import (
+    ConsolidationResult,
+    ExperienceConsolidator,
+)
 from .memory import BuiltinMemoryProvider, MemoryManager, MemoryProvider
 from .prompt import PromptCompiler
 from .skills import Skill, SkillsLibrary
@@ -16,8 +19,9 @@ from .skills import Skill, SkillsLibrary
 __all__ = [
     "AgentProfileService",
     "BuiltinMemoryProvider",
+    "ConsolidationResult",
     "CompressionConfig",
-    "GrowthResult",
+    "ExperienceConsolidator",
     "IdavollApp",
     "IdavollConfig",
     "JobScheduler",
@@ -28,7 +32,6 @@ __all__ = [
     "ProfileWorkspaceManager",
     "PromptCompiler",
     "SchedulerConfig",
-    "SelfGrowthEngine",
     "SessionConfig",
     "SessionManager",
     "Skill",

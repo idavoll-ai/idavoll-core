@@ -112,6 +112,10 @@ class VingolfConfig(BaseModel):
     review: ReviewConfig = Field(default_factory=ReviewConfig)
     topic: TopicConfig = Field(default_factory=TopicConfig)
     leveling: LevelingConfig = Field(default_factory=LevelingConfig)
+    db_path: str = Field(
+        default="vingolf.db",
+        description="Path to the SQLite database file. Relative paths are resolved from CWD.",
+    )
 
     @model_validator(mode="before")
     @classmethod

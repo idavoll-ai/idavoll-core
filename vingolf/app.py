@@ -5,10 +5,12 @@ from typing import TYPE_CHECKING
 
 from idavoll.app import IdavollApp
 from idavoll.config import IdavollConfig
+from idavoll.persistence import AgentProfileRepository, Database
 from idavoll.plugin.base import IdavollPlugin
 from idavoll.plugin.hooks import HookBus
 
 from .config import VingolfConfig
+from .persistence import AgentProgressRepository, TopicRepository
 from .progress import AgentProgress
 from .plugins.leveling import LevelingPlugin
 from .plugins.review import ReviewPlugin
@@ -36,6 +38,12 @@ class VingolfApp:
     ) -> None:
         self._config = config or VingolfConfig()
         self._app = idavoll_app
+
+        # Persistence layer — initialised lazily by startup()
+        self._db: Database | None = None
+        self._agent_repo: AgentProfileRepository | None = None
+        self._topic_repo: TopicRepository | None = None
+        self._progress_repo: AgentProgressRepository | None = None
 
         resolved_plugins = list(plugins or [])
         if not resolved_plugins:
@@ -69,6 +77,60 @@ class VingolfApp:
             (plugin for plugin in resolved_plugins if isinstance(plugin, LevelingPlugin)),
             None,
         )
+
+    async def startup(self) -> None:
+        """Open the database, wire repos to plugins, and restore persisted state.
+
+        Call once after constructing ``VingolfApp``, before serving requests.
+        Integrates with FastAPI's ``lifespan`` or any async startup hook.
+        """
+        db = Database(self._config.db_path)
+        await db.init()
+        self._db = db
+        self._agent_repo = AgentProfileRepository(db)
+        self._topic_repo = TopicRepository(db)
+        self._progress_repo = AgentProgressRepository(db)
+
+        # Wire repos into plugins
+        if self.topic is not None:
+            self.topic.repo = self._topic_repo
+        if self.leveling is not None:
+            self.leveling._repo = self._progress_repo
+
+        # Register AgentLoader so Core can restore profiles from DB
+        self._app.set_agent_loader(self._agent_repo.get)
+
+        # Hook: persist profile whenever an agent is created
+        @self._app.hooks.hook("agent.created")
+        async def _on_agent_created(agent, **_) -> None:
+            await self._agent_repo.save(agent.profile)  # type: ignore[union-attr]
+
+        # Hook: persist budget changes (level-up expands budget.total)
+        @self._app.hooks.hook("agent.level_up")
+        async def _on_level_up(agent, **_) -> None:
+            await self._agent_repo.save(agent.profile)  # type: ignore[union-attr]
+
+        # Restore all known agents into the registry
+        for profile in await self._agent_repo.all():
+            if self._app.agents.get(profile.id) is None:
+                agent = self._app.agents.register(profile)
+                try:
+                    workspace = self._app.workspaces.load(profile.id)
+                    self._app._attach_runtime(agent, workspace)
+                except FileNotFoundError:
+                    pass  # workspace not on disk; agent metadata still usable
+
+        # Restore topic + leveling state
+        if self.topic is not None:
+            await self.topic.load_state()
+        if self.leveling is not None:
+            await self.leveling.load_state()
+
+    async def shutdown(self) -> None:
+        """Close the database connection gracefully."""
+        if self._db is not None:
+            await self._db.close()
+            self._db = None
 
     @classmethod
     def from_config(

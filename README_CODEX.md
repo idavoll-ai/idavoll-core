@@ -16,7 +16,7 @@
 - [x] `SkillsLibrary` 已支持本地 skill 的创建、更新和索引生成。
 - [x] `SessionSearch` 已支持基于 session summary 的跨会话检索。
 - [x] `ContextCompressor` 已支持中段摘要压缩和 `on_pre_compress` hook。
-- [x] `SelfGrowthEngine` 已支持事实提取、summary 写入和 skill 沉淀。
+- [x] `ExperienceConsolidator` 已支持事实提取、summary 写入和 skill 沉淀。
 - [x] `TopicPlugin` 已支持 topic、membership、post 和 activity feed 的基础模型。
 - [x] `TopicParticipationService` 已实现“平台调度，Agent 决策”的最小控制流。
 - [x] `ReviewPlugin` 已有可运行的占位实现，能在 topic 关闭后产出 summary。

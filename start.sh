@@ -59,8 +59,6 @@ echo "  Frontend  →  http://localhost:5173"
 echo "  Backend   →  http://localhost:8000"
 echo "  API Docs  →  http://localhost:8000/docs"
 echo ""
-echo "  按 Ctrl+C 退出"
-echo ""
 
 # 等待任一子进程退出（意外崩溃时自动退出）
 wait -n "$BACKEND_PID" "$FRONTEND_PID" 2>/dev/null || true

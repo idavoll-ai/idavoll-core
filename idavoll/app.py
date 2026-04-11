@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import dataclasses
+import functools
+import inspect
 from pathlib import Path
 from typing import Any
 
 from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import AIMessage, ToolMessage
 
 from .agent.profile_service import AgentProfileService
 from .agent.registry import Agent, AgentLoader, AgentRegistry
@@ -12,7 +16,7 @@ from .agent.workspace import ProfileWorkspace, ProfileWorkspaceManager
 from .config import IdavollConfig
 from .llm.adapter import LLMAdapter
 from .memory.builtin import BuiltinMemoryProvider
-from .memory.cognition import GrowthResult, SelfGrowthEngine
+from .memory.cognition import ConsolidationResult, ExperienceConsolidator
 from .memory.manager import MemoryManager
 from .session.compressor import ContextCompressor
 from .session.search import SessionSearch
@@ -23,7 +27,8 @@ from .prompt.compiler import PromptCompiler
 from .safety.scanner import SafetyScanner
 from .scheduling.scheduler import Scheduler
 from .session.session import Session
-from .tools.registry import ToolRegistry, ToolsetManager
+from .tools.builtin import memory_search, memory_write, skill_get, skill_patch
+from .tools.registry import ToolRegistry, Toolset, ToolSpec, ToolsetManager
 
 
 JobScheduler = Scheduler
@@ -92,17 +97,89 @@ class IdavollApp:
             toolsets=self.toolsets,
         )
         self.workspaces = ProfileWorkspaceManager(self._config.workspace.base_dir)
-        self.growth_engine = SelfGrowthEngine(self.llm, self.hooks)
+        self.experience_consolidator = ExperienceConsolidator(self.llm, self.hooks)
         self.compressor = ContextCompressor(
             self.llm, self.hooks, self._config.compression
         )
         self._plugins: list[IdavollPlugin] = []
         self._agent_loader: AgentLoader | None = None
+        self._register_builtin_tools()
 
     @classmethod
     def from_config(cls, config: IdavollConfig, api_key: str | None = None) -> "IdavollApp":
         llm = config.llm.build(api_key=api_key)
         return cls(llm=llm, config=config)
+
+    def _register_builtin_tools(self) -> None:
+        """Register Core builtin tools and define their default toolsets."""
+        for fn in (memory_write, memory_search, skill_get, skill_patch):
+            spec: ToolSpec = getattr(fn, "__tool_spec__")
+            self.tool_registry.register(spec)
+
+        self.toolsets.define(Toolset(
+            name="memory",
+            tools=["memory_write", "memory_search"],
+            description="Agent 长期记忆读写",
+        ))
+        self.toolsets.define(Toolset(
+            name="skills",
+            tools=["skill_get", "skill_patch"],
+            description="Agent Skill 查看与更新",
+        ))
+        self.toolsets.define(Toolset(
+            name="builtin",
+            includes=["memory", "skills"],
+            description="Core 全部内置工具",
+        ))
+
+    @staticmethod
+    def _bind_agent_tools(agent: "Agent") -> None:
+        """Bind agent-scoped services into builtin tool fns via functools.partial.
+
+        Builtin tool functions declare ``_agent`` as a keyword-only parameter to
+        signal that it should be injected at bind time rather than supplied by the
+        LLM.  This method replaces each such ToolSpec with a new instance whose
+        ``fn`` is a partial with ``_agent`` pre-filled, so the execution loop can
+        call ``spec.fn(**llm_args)`` without any extra plumbing.
+        """
+        bound: list[ToolSpec] = []
+        for spec in agent.tools:
+            if spec.fn is not None and "_agent" in inspect.signature(spec.fn).parameters:
+                bound.append(dataclasses.replace(spec, fn=functools.partial(spec.fn, _agent=agent)))
+            else:
+                bound.append(spec)
+        agent.tools = bound
+
+    def unlock_toolset(self, agent: "Agent", toolset_name: str) -> "Agent":
+        """Unlock a toolset for an agent and re-bind agent-scoped tool fns.
+
+        Wraps ``AgentRegistry.unlock_toolset`` so that builtin tools (which
+        declare ``_agent`` in their signature) are re-bound with the correct
+        agent reference after every tool resolution.
+        """
+        self.agents.unlock_toolset(agent.id, toolset_name)
+        self._bind_agent_tools(agent)
+        return agent
+
+    async def create_session(
+        self,
+        participants: list["Agent"],
+        metadata: dict[str, Any] | None = None,
+        max_context_messages: int = 20,
+    ) -> Session:
+        """Create a session and emit ``on_session_start``.
+
+        Prefer this over ``app.sessions.create()`` so plugins that listen on
+        ``on_session_start`` are notified.  ``app.sessions.create()`` remains
+        available for cases where no hook notification is needed (e.g. tests).
+        """
+        session = self.sessions.create(
+            participants=participants,
+            metadata=metadata,
+            max_context_messages=max_context_messages,
+        )
+        await self.hooks.emit("on_session_start", session=session, participants=participants)
+        return session
 
     def set_agent_loader(self, loader: AgentLoader) -> "IdavollApp":
         """Register a loader that restores AgentProfiles from external storage.
@@ -128,6 +205,7 @@ class IdavollApp:
             agent.profile.enabled_toolsets,
             disabled_tools=agent.profile.disabled_tools,
         )
+        self._bind_agent_tools(agent)
 
     async def create_agent(self, name: str, description: str) -> Agent:
         profile, soul = await self.profile_service.compile(name, description)
@@ -239,7 +317,7 @@ class IdavollApp:
 
         # 4. Build the dynamic turn messages.
         await self.hooks.emit(
-            "llm.generate.before",
+            "pre_llm_call",
             agent=agent,
             session=session,
             scene_context=scene_context,
@@ -254,10 +332,62 @@ class IdavollApp:
             current_message=current_message,
         )
 
-        content = await self.llm.generate(messages)
+        # 5. Tool execution loop.
+        # If the agent has callable tools, bind them natively so the LLM can
+        # emit tool_calls.  We loop until the model stops calling tools (or
+        # hits the safety cap), firing pre_tool_call / post_tool_call hooks on
+        # each invocation.  Falls back to a plain generate() when no callable
+        # tools are configured so the hot path is unchanged.
+        callable_tools = [t for t in agent.tools if t.fn is not None]
+
+        if callable_tools:
+            # Index by name so dispatch uses the agent-bound (partial) specs,
+            # not the raw registry entries which lack the _agent injection.
+            tool_index = {t.name: t for t in callable_tools}
+            loop_messages = list(messages)
+            ai_message: AIMessage | None = None
+            for _ in range(10):  # safety cap: at most 10 tool-call rounds
+                ai_message = await self.llm.generate_with_tools(loop_messages, callable_tools)
+                if not getattr(ai_message, "tool_calls", None):
+                    break
+                loop_messages.append(ai_message)
+                for tc in ai_message.tool_calls:
+                    t_name = tc["name"]
+                    t_args = tc["args"]
+                    t_id = tc["id"]
+                    await self.hooks.emit(
+                        "pre_tool_call",
+                        agent=agent,
+                        session=session,
+                        tool_name=t_name,
+                        tool_args=t_args,
+                    )
+                    spec = tool_index.get(t_name)
+                    if spec is not None and spec.fn is not None:
+                        try:
+                            result = spec.fn(**t_args)
+                            if inspect.isawaitable(result):
+                                result = await result
+                            result_str = str(result)
+                        except Exception as exc:  # noqa: BLE001
+                            result_str = f"[tool error] {exc}"
+                    else:
+                        result_str = f"[tool {t_name!r} not available]"
+                    await self.hooks.emit(
+                        "post_tool_call",
+                        agent=agent,
+                        session=session,
+                        tool_name=t_name,
+                        tool_args=t_args,
+                        result=result_str,
+                    )
+                    loop_messages.append(ToolMessage(content=result_str, tool_call_id=t_id))
+            content = str(ai_message.content) if ai_message and ai_message.content else ""
+        else:
+            content = await self.llm.generate(messages)
 
         await self.hooks.emit(
-            "llm.generate.after",
+            "post_llm_call",
             agent=agent,
             session=session,
             content=content,
@@ -311,21 +441,21 @@ class IdavollApp:
         self,
         session: Session,
         agents: list[Agent] | None = None,
-    ) -> list[GrowthResult]:
-        """Close a session and run Self-Growth Engine for each agent.
+    ) -> list[ConsolidationResult]:
+        """Close a session and run the experience consolidator for each agent.
 
         If *agents* is None, all ``Agent`` instances in
-        ``session.participants`` are used.  Returns one ``GrowthResult``
+        ``session.participants`` are used.  Returns one ``ConsolidationResult``
         per agent.
         """
         if agents is None:
             agents = [a for a in session.participants if isinstance(a, Agent)]
 
-        results: list[GrowthResult] = []
+        results: list[ConsolidationResult] = []
         for agent in agents:
-            result = await self.growth_engine.run(agent, session)
+            result = await self.experience_consolidator.run(agent, session)
             results.append(result)
 
         session.close()
-        await self.hooks.emit("session.closed", session=session, results=results)
+        await self.hooks.emit("on_session_end", session=session, results=results)
         return results

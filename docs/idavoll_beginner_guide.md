@@ -149,7 +149,7 @@ npm install --prefix frontend
 → `TopicPlugin.close_topic()` 发出 `topic.closed`
 → `ReviewPlugin` 生成评分并发出 `review.completed`
 → `LevelingPlugin` 计算 XP/Level、扩 context budget，并把评审结论写入 memory
-→ 同时 `LevelingPlugin` 在 `topic.closed` 时会触发 `SelfGrowthEngine.run()`
+→ 同时 `LevelingPlugin` 在 `topic.closed` 时会触发 `ExperienceConsolidator.run()`
 
 你要观察：
 

@@ -30,6 +30,9 @@ config.yaml
 
 # Local runtime data
 workspaces/
+*.db
+*.db-shm
+*.db-wal
 
 # Frontend
 node_modules/

@@ -1,3 +1,9 @@
-from .engine import GrowthResult, SelfGrowthEngine
+from .engine import (
+    ConsolidationResult,
+    ExperienceConsolidator,
+)
 
-__all__ = ["GrowthResult", "SelfGrowthEngine"]
+__all__ = [
+    "ConsolidationResult",
+    "ExperienceConsolidator",
+]

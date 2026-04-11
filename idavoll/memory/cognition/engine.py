@@ -26,7 +26,7 @@ class FactWrite:
 
 
 @dataclass
-class GrowthResult:
+class ConsolidationResult:
     session_id: str
     facts_written: int = 0
     facts_skipped: int = 0
@@ -81,10 +81,10 @@ _SKILL_EXTRACTION_SYSTEM = """\
 
 
 # ---------------------------------------------------------------------------
-# SelfGrowthEngine
+# ExperienceConsolidator
 # ---------------------------------------------------------------------------
 
-class SelfGrowthEngine:
+class ExperienceConsolidator:
     """Orchestrates post-session experience consolidation (§4.2 / §8.4).
 
     Pipeline (called once per agent when a session closes):
@@ -106,13 +106,13 @@ class SelfGrowthEngine:
     # Public entry point
     # ------------------------------------------------------------------
 
-    async def run(self, agent: "Agent", session: "Session") -> GrowthResult:
-        """Run the full growth pipeline for *agent* on *session*.
+    async def run(self, agent: "Agent", session: "Session") -> ConsolidationResult:
+        """Run the full consolidation pipeline for *agent* on *session*.
 
         Safe to call even when the session has no messages or the agent
         has no workspace — both cases are handled gracefully.
         """
-        result = GrowthResult(session_id=session.id)
+        result = ConsolidationResult(session_id=session.id)
 
         messages = session.recent_messages()
         if not messages:
@@ -133,12 +133,11 @@ class SelfGrowthEngine:
         await self._maybe_save_skill(agent, conversation, result)
 
         await self._hooks.emit(
-            "growth.completed",
+            "consolidation.completed",
             agent=agent,
             session=session,
             result=result,
         )
-
         return result
 
     # ------------------------------------------------------------------
@@ -149,7 +148,7 @@ class SelfGrowthEngine:
         self,
         agent: "Agent",
         conversation: str,
-        result: GrowthResult,
+        result: ConsolidationResult,
     ) -> None:
         if agent.memory is None:
             return
@@ -222,7 +221,7 @@ class SelfGrowthEngine:
         self,
         agent: "Agent",
         conversation: str,
-        result: GrowthResult,
+        result: ConsolidationResult,
     ) -> None:
         """Ask the LLM if the conversation contains a reusable skill worth saving."""
         if agent.skills is None:
@@ -303,3 +302,4 @@ class SelfGrowthEngine:
             if content and target in ("memory", "user"):
                 results.append(FactWrite(content=content, target=target))
         return results
+

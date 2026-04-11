@@ -48,7 +48,7 @@
 - [ ] Review Plugin 目前是纯确定性评分（post 数量 + 点赞），设计文档中提到多维评分策略（AllPostsStrategy、HotPostStrategy 等）尚未落地。
 - [x] 现在的讨论是从Topic层面发出讨论，而不是用户选择自己的Agent加入哪个Topic去讨论
 - [x] SOUL.md - 生成 SOUL.md 的方式应该以对话式来创建 -- 参考 DeerFlow 的设计
-- [ ] 没有工具执行循环 - 设计 §4.2 要求 Tool Registry 支持 pre_tool_call / post_tool_call 钩子，意味着 Core 要有一个 Agent 工具调用执行环。当前的实现：工具只是被"描述"进 System Prompt，Agent 的回复是纯文本，没有任何工具实际被执行。pre_tool_call / post_tool_call 根本不可能触发，因为 Core 里不存在解析和分发工具调用的逻辑。这不是 MVP 的小细节——如果评审反馈要触发 skill patch、memory write 等工具，或者 Topic Participation 要 Agent 通过工具决策，这个环路是必须的。
+- [x] 没有工具执行循环 - 设计 §4.2 要求 Tool Registry 支持 pre_tool_call / post_tool_call 钩子，意味着 Core 要有一个 Agent 工具调用执行环。当前的实现：工具只是被"描述"进 System Prompt，Agent 的回复是纯文本，没有任何工具实际被执行。pre_tool_call / post_tool_call 根本不可能触发，因为 Core 里不存在解析和分发工具调用的逻辑。这不是 MVP 的小细节——如果评审反馈要触发 skill patch、memory write 等工具，或者 Topic Participation 要 Agent 通过工具决策，这个环路是必须的。
 - [ ]  XP/Level 没有落在 AgentRegistry - 设计 §4.2 明确写：AgentRegistry 应追踪"当前等级和 XP"。当前状态：XP/Level 存在 Vingolf 的 AgentProgressStore 里，和 Core 的 AgentRegistry / AgentProfile 完全隔离。LevelingPlugin 通过直接修改 agent.profile.budget.total 实现能力扩容——这个能力边界更新是对的，但 XP/Level 状态本身不在 Core 里，也没有持久化。App 重启后等级归零。设计要求 Agent Registry 刷新能力配置（§8.3），说明等级驱动的能力配置理应从 Core 层统一管理。
 - [ ] Hook 事件命名与设计不一致 - 设计 §4.2 列出的钩子 vs 代码实际发出的事件：
 设计规定	代码实际
@@ -59,11 +59,11 @@ on_session_end	session.closed
 pre_tool_call / post_tool_call	未实现（无工具执行环）
 命名不一致会导致 Plugin 作者按设计文档写的 hook 名称注册不上去。
 - [ ] Memory slot 配额未实现 设计要求 AgentRegistry 追踪 memory slot 配额，并在 Leveling 时扩容。AgentProfile 只有 ContextBudget（context token 预算），没有 memory slot 配额的概念，BuiltinMemoryProvider 也没有配额检查机制。
-- [ ] SelfGrowthEngine 没有跨会话的模式识别（第三层反馈），只做单次 session 的事实提取, 这里的 SelfGrowthEngine 需要重点考虑一下
+- [ ] ExperienceConsolidator 没有跨会话的模式识别（第三层反馈），只做单次 session 的事实提取, 这里的 ExperienceConsolidator 需要重点考虑一下
 > 我有个想法其实是： 因为很多操作都是业务操作，比如说XP，Level，而这些操作注定是不能落到Core 上进行具体实现的，但是由于我们是有长期记忆的能力，那么是不是可以用 User.md 来控制他的权限行为，同时因为我们搭建了 ToolSet，LLM 可以触发这些 ToolSet 调用 tool 对自身的配额，token 权限做相应的修改 - 同时这要考虑到 Memory 的结构设计怎么考虑
 > 第二个是基于上述的点，我考虑到的是 不可能是 自己调用工具修改自己的权限配额吧，这也太扯淡了，那么是不是可以有一个 Master Agent， 然后做 A2A？ 让 Master Agent 来统一对相关情况做统一调度，那么这个时候是不是可以设置一个 Agent 池，可能需要考虑到Agent一次调用时间过长，但是我们需要通联的Agent过多的情况下，这个实现形式不好解决
 > 第三个是 关于 XP/Level 的成长设计，等级越高的 Agent 有越多的Tool调用以及Skills 理解，同时还有知识库的搭建，这些 至少我们基础的 Core 得支持
-- [ ] 持久化
+- [x] 持久化
 - [ ] Review Timing -- 现有评审触发时机是 Topic Close， 应该 多 Timing 设计
 
 ---

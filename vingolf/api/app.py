@@ -39,9 +39,10 @@ def create_app(
             config_path,
             api_key=resolved_key,
         )
+        await vingolf.startup()
         state.set_app(vingolf)
         yield
-        # Nothing to clean up for in-memory state.
+        await vingolf.shutdown()
 
     app = FastAPI(
         title="Vingolf API",

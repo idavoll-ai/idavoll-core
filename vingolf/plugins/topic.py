@@ -74,18 +74,41 @@ class ParticipationDecision(BaseModel):
 
 
 class TopicPlugin(IdavollPlugin):
-    """Product-side topic aggregate plus in-memory persistence."""
+    """Product-side topic aggregate plus optional SQLite persistence.
+
+    Pass a ``TopicRepository`` at construction time (or set ``plugin.repo``
+    before calling ``load_state()``) to enable write-through persistence.
+    Without a repo the plugin behaves exactly as before — pure in-memory.
+    """
 
     name = "vingolf.topic"
 
-    def __init__(self, config: TopicConfig | None = None) -> None:
+    def __init__(
+        self,
+        config: TopicConfig | None = None,
+        repo: "TopicRepository | None" = None,
+    ) -> None:
         self._config = config or TopicConfig()
         self._app: IdavollApp | None = None
         self._topics: dict[str, Topic] = {}
         self._posts: dict[str, list[Post]] = {}
+        self.repo: "TopicRepository | None" = repo
 
     def install(self, app: "IdavollApp") -> None:
         self._app = app
+
+    async def load_state(self) -> None:
+        """Restore topics and posts from the DB into memory.
+
+        Call this once after the app is fully initialised (sessions restored,
+        agents loaded) so that in-memory state matches the DB.
+        """
+        if self.repo is None:
+            return
+        topics = await self.repo.all_topics()
+        for topic in topics:
+            self._topics[topic.id] = topic
+            self._posts[topic.id] = await self.repo.get_posts(topic.id)
 
     async def create_topic(
         self,
@@ -113,6 +136,8 @@ class TopicPlugin(IdavollPlugin):
             topic.memberships[agent.id] = TopicMembership(agent_id=agent.id)
         self._topics[topic.id] = topic
         self._posts[topic.id] = []
+        if self.repo is not None:
+            await self.repo.save_topic(topic)
         await app.hooks.emit("topic.created", topic=topic, session=session)
         return topic
 
@@ -126,6 +151,8 @@ class TopicPlugin(IdavollPlugin):
         topic.memberships.setdefault(agent.id, TopicMembership(agent_id=agent.id))
         session.add_participant(agent)
         membership = topic.memberships[agent.id]
+        if self.repo is not None:
+            await self.repo.save_topic(topic)
         await self._require_app().hooks.emit(
             "topic.membership.joined",
             topic=topic,
@@ -180,6 +207,8 @@ class TopicPlugin(IdavollPlugin):
         topic.closed_at = _now()
         session = self._require_app().sessions.get_or_raise(topic.session_id)
         session.close()
+        if self.repo is not None:
+            await self.repo.save_topic(topic)
         await self._require_app().hooks.emit(
             "topic.closed",
             topic=topic,
@@ -238,6 +267,9 @@ class TopicPlugin(IdavollPlugin):
             reply_to=reply_to,
         )
         self._posts[topic_id].append(post)
+        if self.repo is not None:
+            await self.repo.save_post(post)
+            await self.repo.save_topic(topic)  # sync membership.last_post_at
 
         session = app.sessions.get_or_raise(topic.session_id)
         session.add_message(

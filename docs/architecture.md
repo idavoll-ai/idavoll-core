@@ -26,7 +26,7 @@
 │   IdavollApp  AgentRegistry  SessionManager  Scheduler          │
 │   PromptCompiler  LLMAdapter  SafetyScanner                     │
 │   MemoryManager  SkillsLibrary  SessionSearch                   │
-│   SelfGrowthEngine  ContextCompressor  HookBus                  │
+│   ExperienceConsolidator  ContextCompressor  HookBus                  │
 ├─────────────────────────────────────────────────────────────────┤
 │                    Profile Workspace (Disk)                     │
 │   SOUL.md  MEMORY.md  USER.md  PROJECT.md  skills/  sessions/   │
@@ -48,7 +48,7 @@ workspaces/
     PROJECT.md       ← 可选的项目上下文
     skills/
       {skill-name}/
-        SKILL.md     ← 可复用工作流（由 SelfGrowthEngine 生成）
+        SKILL.md     ← 可复用工作流（由 ExperienceConsolidator 生成）
     sessions/
       {session_id}.md ← 每次会话结束后写入的摘要
 ```
@@ -136,7 +136,7 @@ MemoryManager
   system_prompt_block()    → 合并所有 Provider 的静态块（session 开始时冻结）
   prefetch(query, context) → 每轮前召回相关记忆片段
   sync_turn(user, asst)    → 轮次结束通知（BuiltinProvider 是 no-op）
-  write_fact(content, target) → 写入持久事实（由 SelfGrowthEngine 调用）
+  write_fact(content, target) → 写入持久事实（由 ExperienceConsolidator 调用）
 
 BuiltinMemoryProvider
   读写 MEMORY.md / USER.md
@@ -148,7 +148,7 @@ BuiltinMemoryProvider
     - 精确重复跳过
 ```
 
-### 4.6 SelfGrowthEngine
+### 4.6 ExperienceConsolidator
 
 会话结束后由 `IdavollApp.close_session()` 调用，执行三步：
 
@@ -289,11 +289,11 @@ LLM 失败时回退到确定性公式：
 
 监听两个事件：
 
-**`topic.closed`** → 运行 SelfGrowthEngine（自主成长闭环接入点）：
+**`topic.closed`** → 运行 ExperienceConsolidator（自主成长闭环接入点）：
 
 ```python
 for agent in topic.memberships:
-    await app.growth_engine.run(agent, session)
+    await app.experience_consolidator.run(agent, session)
 ```
 
 **`review.completed`** → 外部成长闭环：
@@ -323,7 +323,7 @@ while xp >= base_xp_per_level × level:
   ▼
 topic.closed
   │
-  ├─ SelfGrowthEngine.run(agent, session)
+  ├─ ExperienceConsolidator.run(agent, session)
   │    ├─ LLM 提取事实 → MEMORY.md / USER.md
   │    ├─ LLM 生成摘要 → sessions/{id}.md
   │    └─ LLM 判断技能 → skills/{name}/SKILL.md
@@ -369,7 +369,7 @@ TopicPlugin.close_topic(topic_id)
        │
        ├─ [LevelingPlugin] on_topic_closed
        │    └─ for each agent in memberships:
-       │         SelfGrowthEngine.run(agent, session)
+       │         ExperienceConsolidator.run(agent, session)
        │           ├─ 提取事实 → MEMORY.md / USER.md
        │           ├─ 写 sessions/{id}.md
        │           └─ 提取技能 → skills/
@@ -411,7 +411,7 @@ Session 第一轮（首次 generate_response）
        └─ MemoryManager.sync_turn(user_msg, content)   ← 轮次通知
 
 Session 结束（close_session / topic.closed）
-  └─ SelfGrowthEngine.run(agent, session)
+  └─ ExperienceConsolidator.run(agent, session)
        └─ 更新 MEMORY.md / USER.md / sessions/ / skills/
 ```
 
@@ -524,7 +524,7 @@ vingolf/
       builtin.py             BuiltinMemoryProvider（MEMORY.md / USER.md）
       manager.py             MemoryManager
       cognition/
-        engine.py            SelfGrowthEngine
+        engine.py            ExperienceConsolidator
     plugin/
       base.py                IdavollPlugin 基类
       hooks.py               HookBus
@@ -643,13 +643,13 @@ vingolf/
 │  │    .generate(messages) → str                                          │ │
 │  │    .raw → BaseChatModel (LangChain)                                   │ │
 │  │    ↑ 被使用方：AgentProfileService / PromptCompiler(通过 generate_   │ │
-│  │                response) / SelfGrowthEngine / ContextCompressor /     │ │
+│  │                response) / ExperienceConsolidator / ContextCompressor /     │ │
 │  │                ReviewPlugin                                           │ │
 │  │                                                                       │ │
 │  │  HookBus                                                              │ │
 │  │    .on(event, handler)  /  .hook(event)  /  await .emit(event, **kw) │ │
 │  │    ↑ 被监听方：所有 Plugin（通过 install(app) 注册）                  │ │
-│  │    ↑ 发布方：IdavollApp / SelfGrowthEngine / ContextCompressor        │ │
+│  │    ↑ 发布方：IdavollApp / ExperienceConsolidator / ContextCompressor        │ │
 │  │                                                                       │ │
 │  │  AgentProfileService          ToolRegistry + ToolsetManager           │ │
 │  │    compile(name, desc)          register(ToolSpec)                    │ │
@@ -657,7 +657,7 @@ vingolf/
 │  │    → (AgentProfile, SoulSpec)   resolve(enabled, disabled) → tools   │ │
 │  │                                 build_index() → prompt block          │ │
 │  │                                                                       │ │
-│  │  SelfGrowthEngine                ContextCompressor                    │ │
+│  │  ExperienceConsolidator                ContextCompressor                    │ │
 │  │    run(agent, session)            maybe_compress(agent, session)      │ │
 │  │    ├─ extract facts → MEMORY.md  head(2) + summarize(middle) + tail  │ │
 │  │    ├─ write session summary       emit("on_pre_compress")             │ │
@@ -794,7 +794,7 @@ LLMAdapter.generate(messages, run_name, metadata, tags) → str
 |------|------|------|
 | Session 启动 | `system_prompt_block()` | 将 MEMORY.md + USER.md 全量冻结进 System Prompt |
 | 每轮前 | `prefetch(query)` | 按关键词从 MEMORY.md + USER.md 召回相关片段，动态注入 |
-| 每轮后 | `sync_turn()` | no-op（写入由 SelfGrowthEngine 调用 `write_fact` 完成）|
+| 每轮后 | `sync_turn()` | no-op（写入由 ExperienceConsolidator 调用 `write_fact` 完成）|
 
 **write_fact 硬约束（在 BuiltinMemoryProvider 中执行）：**
 
@@ -870,7 +870,7 @@ ToolsetManager        为每个 Agent 解析激活工具集
 
 ### 12.9 SkillsLibrary
 
-Agent 在执行任务过程中由 `SelfGrowthEngine` 自动发现并保存的可复用工作流：
+Agent 在执行任务过程中由 `ExperienceConsolidator` 自动发现并保存的可复用工作流：
 
 ```
 skills/
@@ -882,7 +882,7 @@ skills/
 生命周期：
 
 ```
-SelfGrowthEngine._maybe_save_skill()
+ExperienceConsolidator._maybe_save_skill()
   └─ LLM 判断对话是否含可复用流程
        ├─ {"save": false} → 跳过
        └─ {"save": true, name, description, body, tags}
@@ -902,7 +902,7 @@ Agent 下次遇到同类任务时，模型从 Skills Index 中感知到可用工
 
 ```
 数据来源：sessions/{session_id}.md
-  由 SelfGrowthEngine._save_session_summary() 写入
+  由 ExperienceConsolidator._save_session_summary() 写入
 
 检索策略（MVP，无嵌入）：
   关键词分词 → 对每个历史 Session 记录打分
@@ -953,8 +953,8 @@ Core 发布的事件：
 | `llm.generate.before` | `IdavollApp.generate_response` | `agent`, `session`, `scene_context`, `current_message` |
 | `llm.generate.after` | `IdavollApp.generate_response` | `agent`, `session`, `content` |
 | `on_pre_compress` | `ContextCompressor.compress` | `agent`, `session`, `messages` |
-| `on_memory_write` | `SelfGrowthEngine` | `agent`, `content`, `target` |
-| `growth.completed` | `SelfGrowthEngine.run` | `agent`, `session`, `result` |
+| `on_memory_write` | `ExperienceConsolidator` | `agent`, `content`, `target` |
+| `consolidation.completed` | `ExperienceConsolidator.run` | `agent`, `session`, `result` |
 | `session.closed` | `IdavollApp.close_session` | `session`, `results` |
 
 Vingolf Product 发布的事件：
@@ -985,7 +985,7 @@ Vingolf Product 发布的事件：
 10. ToolsetManager       依赖 ToolRegistry
 11. PromptCompiler       依赖 SafetyScanner + ToolsetManager
 12. ProfileWorkspaceManager  依赖 WorkspaceConfig.base_dir
-13. SelfGrowthEngine     依赖 LLMAdapter + HookBus
+13. ExperienceConsolidator     依赖 LLMAdapter + HookBus
 14. ContextCompressor    依赖 LLMAdapter + HookBus + CompressionConfig
 ```
 

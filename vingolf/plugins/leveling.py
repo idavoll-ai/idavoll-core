@@ -10,6 +10,7 @@ from .review import TopicReviewSummary
 if TYPE_CHECKING:
     from idavoll.agent.registry import Agent
     from idavoll.app import IdavollApp
+    from vingolf.persistence import AgentProgressRepository
 
 
 class LevelingPlugin(IdavollPlugin):
@@ -17,23 +18,28 @@ class LevelingPlugin(IdavollPlugin):
 
     name = "vingolf.leveling"
 
-    def __init__(self, config: LevelingConfig | None = None) -> None:
+    def __init__(
+        self,
+        config: LevelingConfig | None = None,
+        repo: "AgentProgressRepository | None" = None,
+    ) -> None:
         self._config = config or LevelingConfig()
         self._app: IdavollApp | None = None
         self._progress = AgentProgressStore()
+        self._repo: "AgentProgressRepository | None" = repo
 
     def install(self, app: "IdavollApp") -> None:
         self._app = app
 
         @app.hooks.hook("topic.closed")
         async def on_topic_closed(topic, session, **_) -> None:
-            """Run Self-Growth Engine for every agent that participated."""
+            """Run the experience consolidator for every agent that participated."""
             agents = [
                 a for a in app.agents.all()
                 if a.id in topic.memberships
             ]
             for agent in agents:
-                await app.growth_engine.run(agent, session)
+                await app.experience_consolidator.run(agent, session)
 
         @app.hooks.hook("review.completed")
         async def on_review_completed(summary: TopicReviewSummary, **_) -> None:
@@ -48,6 +54,13 @@ class LevelingPlugin(IdavollPlugin):
                     topic_title=summary.topic_title,
                 )
 
+    async def load_state(self) -> None:
+        """Restore XP/Level from DB into the in-memory store."""
+        if self._repo is None:
+            return
+        for p in await self._repo.all():
+            self._progress._items[p.agent_id] = p
+
     def get_progress(self, agent_id: str) -> AgentProgress | None:
         return self._progress.get(agent_id)
 
@@ -59,7 +72,11 @@ class LevelingPlugin(IdavollPlugin):
         topic_title: str = "",
     ) -> None:
         assert self._app is not None
-        progress = self._progress.get_or_create(agent.id)
+        if self._repo is not None:
+            progress = await self._repo.get_or_create(agent.id)
+            self._progress._items[agent.id] = progress
+        else:
+            progress = self._progress.get_or_create(agent.id)
         xp_gained = int(final_score * self._config.xp_per_point)
         old_level = progress.level
         progress.xp += xp_gained
@@ -68,6 +85,9 @@ class LevelingPlugin(IdavollPlugin):
             progress.xp -= self._config.base_xp_per_level * progress.level
             progress.level += 1
             agent.profile.budget.total += self._config.budget_increment_per_level
+
+        if self._repo is not None:
+            await self._repo.save(progress)
 
         # Write review feedback into MEMORY.md so the agent can learn from it.
         if agent.memory and review_summary:
