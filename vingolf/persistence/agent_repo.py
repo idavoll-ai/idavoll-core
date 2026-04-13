@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
-from ..agent.profile import AgentProfile, ContextBudget
+from idavoll.agent.profile import AgentProfile, ContextBudget
 
 if TYPE_CHECKING:
     from .database import Database
@@ -60,12 +60,16 @@ class AgentProfileRepository:
 
     async def all(self) -> list[AgentProfile]:
         """Return all stored AgentProfiles."""
-        async with self._db.conn.execute("SELECT * FROM agents ORDER BY created_at") as cur:
+        async with self._db.conn.execute(
+            "SELECT * FROM agents ORDER BY created_at"
+        ) as cur:
             rows = await cur.fetchall()
         return [self._row_to_profile(r) for r in rows]
 
     async def delete(self, agent_id: str) -> None:
-        await self._db.conn.execute("DELETE FROM agents WHERE id = ?", (agent_id,))
+        await self._db.conn.execute(
+            "DELETE FROM agents WHERE id = ?", (agent_id,)
+        )
         await self._db.conn.commit()
 
     @staticmethod

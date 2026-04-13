@@ -30,19 +30,27 @@ idavoll:
     # temperature: 0.7
     # max_tokens: 1024
 
-    provider: deepseek
-    model: deepseek-chat
-    base_url: "https://api.deepseek.com/v1"
-    api_key: "sk-c16c66100f514873a9cd8f2ed7c5ca9f"
-    temperature: 0.7
-    max_tokens: 1024
+    # provider: deepseek
+    # model: deepseek-chat
+    # base_url: "https://api.deepseek.com/v1"
+    # api_key: "sk-c16c66100f514873a9cd8f2ed7c5ca9f"
+    # temperature: 0.7
+    # max_tokens: 1024
 
+ 
     # provider: kimi
     # model: moonshot-v1-8k      # moonshot-v1-8k | moonshot-v1-32k | moonshot-v1-128k
     # base_url: "https://api.moonshot.cn/v1"
     # api_key: "sk-xxxx"
     # temperature: 0.7
     # max_tokens: 1024
+
+    provider: siliconflow
+    model: Pro/zai-org/GLM-5.1  # or any model available on siliconflow.cn
+    base_url: "https://api.siliconflow.cn/v1"
+    api_key: "sk-hqjijmsnfqaokhbnkfjtjmrkolikqzserutzpkdiuluqrtec"          # SILICONFLOW_API_KEY env var also accepted
+    temperature: 0.7
+    max_tokens: 1024
 
   session:
     default_rounds: 10           # number of turns per discussion

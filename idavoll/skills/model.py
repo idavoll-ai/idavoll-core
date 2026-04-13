@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Literal
 
 
@@ -21,7 +20,6 @@ class Skill:
     status: Literal["active", "archived"] = "active"
     created_at: str = ""
     updated_at: str = ""
-    path: Path | None = field(default=None, compare=False, repr=False)
 
 
 # ---------------------------------------------------------------------------
@@ -58,8 +56,12 @@ def render_skill(skill: Skill) -> str:
     return "\n".join(lines)
 
 
-def parse_skill(text: str, path: Path | None = None) -> Skill:
-    """Deserialise SKILL.md text into a Skill.  Tolerates missing fields."""
+def parse_skill(text: str, name: str = "") -> Skill:
+    """Deserialise SKILL.md text into a Skill.  Tolerates missing fields.
+
+    *name* is used as a fallback when the frontmatter does not contain a
+    ``name`` key — callers should pass the kebab-case directory name.
+    """
     meta, body = _split_frontmatter(text)
 
     raw_tags = meta.get("tags", "")
@@ -71,14 +73,13 @@ def parse_skill(text: str, path: Path | None = None) -> Skill:
     )
 
     return Skill(
-        name=meta.get("name", path.parent.name if path else ""),
+        name=meta.get("name", name),
         description=meta.get("description", ""),
         body=body,
         tags=tags,
         status=status,
         created_at=meta.get("created_at", ""),
         updated_at=meta.get("updated_at", ""),
-        path=path,
     )
 
 

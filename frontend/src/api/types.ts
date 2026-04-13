@@ -50,6 +50,12 @@ export interface BootstrapChatResponse {
   soul: string | null
 }
 
+export type BootstrapStreamEvent =
+  | { type: 'token'; delta: string }
+  | { type: 'soul'; text: string }
+  | { type: 'error'; message: string }
+  | { type: 'done' }
+
 // ── Topics ───────────────────────────────────────────────
 
 export interface TopicOut {

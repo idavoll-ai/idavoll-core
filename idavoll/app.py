@@ -3,16 +3,29 @@ from __future__ import annotations
 import dataclasses
 import functools
 import inspect
+import json
+import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, AsyncGenerator
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, ToolMessage
 
-from .agent.profile_service import AgentProfileService
 from .agent.registry import Agent, AgentLoader, AgentRegistry
-from .agent.profile import parse_soul_markdown
+from .agent.profile import (
+    AgentProfile,
+    BOOTSTRAP_SENTINEL,
+    BOOTSTRAP_SENTINEL_END,
+    BOOTSTRAP_SYSTEM,
+    SoulSpec,
+    build_soul_from_extracted,
+    extract_soul,
+    parse_soul_markdown,
+    refine_soul_spec,
+)
 from .agent.workspace import ProfileWorkspace, ProfileWorkspaceManager
+
+logger = logging.getLogger(__name__)
 from .config import IdavollConfig
 from .llm.adapter import LLMAdapter
 from .memory.builtin import BuiltinMemoryProvider
@@ -90,7 +103,6 @@ class IdavollApp:
             default_cooldown_seconds=self._config.scheduler.default_cooldown_seconds,
         )
         self.llm = LLMAdapter(llm)
-        self.profile_service = AgentProfileService(self.llm)
         self.safety_scanner = SafetyScanner()
         self.prompt_compiler = PromptCompiler(
             scanner=self.safety_scanner,
@@ -208,7 +220,8 @@ class IdavollApp:
         self._bind_agent_tools(agent)
 
     async def create_agent(self, name: str, description: str) -> Agent:
-        profile, soul = await self.profile_service.compile(name, description)
+        soul = await extract_soul(self.llm, name, description)
+        profile = AgentProfile(name=name, description=description.strip())
         workspace = self.workspaces.get_or_create(profile, soul)
         agent = self.agents.register(profile)
         self._attach_runtime(agent, workspace)
@@ -230,7 +243,7 @@ class IdavollApp:
         """
         self.safety_scanner.scan(soul_text, source="SOUL.md")
         soul = parse_soul_markdown(soul_text)
-        profile = await self.profile_service.build_profile(name, description)
+        profile = AgentProfile(name=name, description=description.strip())
         workspace = self.workspaces.get_or_create(profile, soul)
         # Normalize the stored SOUL.md to the canonical project format.
         workspace.write_soul_spec(profile, soul)
@@ -347,7 +360,7 @@ class IdavollApp:
             loop_messages = list(messages)
             ai_message: AIMessage | None = None
             for _ in range(10):  # safety cap: at most 10 tool-call rounds
-                ai_message = await self.llm.generate_with_tools(loop_messages, callable_tools)
+                ai_message = await self.llm.invoke(loop_messages, tools=callable_tools)
                 if not getattr(ai_message, "tool_calls", None):
                     break
                 loop_messages.append(ai_message)
@@ -399,6 +412,141 @@ class IdavollApp:
 
         return content
 
+    async def generate_response_stream(
+        self,
+        agent: Agent,
+        *,
+        session: Session | None = None,
+        scene_context: str = "",
+        memory_context: str = "",
+        current_message: str | None = None,
+        system_message: str = "",
+    ) -> AsyncGenerator[str, None]:
+        """Streaming variant of generate_response — yields text tokens one by one.
+
+        When callable tools are configured the tool-execution loop runs
+        synchronously (tool calls can't be streamed), then the final LLM
+        reply is yielded as a single chunk.  When no tools are configured
+        the response is streamed token by token from the first token.
+
+        Post-LLM hooks and memory sync are guaranteed to run after the last
+        token (or on early generator close via try/finally).
+        """
+        # 1. Frozen system prompt.
+        if session is not None:
+            frozen = session.frozen_prompts.get(agent.id)
+            if frozen is None:
+                frozen = self.prompt_compiler.compile_system(
+                    agent, system_message=system_message
+                )
+                session.frozen_prompts[agent.id] = frozen
+        else:
+            frozen = self.prompt_compiler.compile_system(
+                agent, system_message=system_message
+            )
+
+        # 2. Context compression.
+        if session is not None:
+            await self.compressor.maybe_compress(agent, session)
+
+        # 3. Memory context.
+        if not memory_context and agent.memory and current_message:
+            memory_context = await agent.memory.prefetch(
+                current_message, scene_context
+            )
+
+        if current_message and agent.session_search:
+            session_ctx = agent.session_search.search(current_message, scene_context)
+            if session_ctx:
+                memory_context = (
+                    (memory_context + "\n\n" + session_ctx)
+                    if memory_context
+                    else session_ctx
+                )
+
+        # 4. Build turn messages.
+        await self.hooks.emit(
+            "pre_llm_call",
+            agent=agent,
+            session=session,
+            scene_context=scene_context,
+            current_message=current_message,
+        )
+
+        messages = self.prompt_compiler.build_turn(
+            frozen,
+            session,
+            scene_context=scene_context,
+            memory_context=memory_context,
+            current_message=current_message,
+        )
+
+        # 5. Tool loop or direct streaming.
+        callable_tools = [t for t in agent.tools if t.fn is not None]
+        content = ""
+
+        try:
+            if callable_tools:
+                tool_index = {t.name: t for t in callable_tools}
+                loop_messages = list(messages)
+                ai_message: AIMessage | None = None
+                for _ in range(10):
+                    ai_message = await self.llm.invoke(
+                        loop_messages, tools=callable_tools
+                    )
+                    if not getattr(ai_message, "tool_calls", None):
+                        break
+                    loop_messages.append(ai_message)
+                    for tc in ai_message.tool_calls:
+                        t_name = tc["name"]
+                        t_args = tc["args"]
+                        t_id = tc["id"]
+                        await self.hooks.emit(
+                            "pre_tool_call",
+                            agent=agent,
+                            session=session,
+                            tool_name=t_name,
+                            tool_args=t_args,
+                        )
+                        spec = tool_index.get(t_name)
+                        if spec is not None and spec.fn is not None:
+                            try:
+                                result = spec.fn(**t_args)
+                                if inspect.isawaitable(result):
+                                    result = await result
+                                result_str = str(result)
+                            except Exception as exc:  # noqa: BLE001
+                                result_str = f"[tool error] {exc}"
+                        else:
+                            result_str = f"[tool {t_name!r} not available]"
+                        await self.hooks.emit(
+                            "post_tool_call",
+                            agent=agent,
+                            session=session,
+                            tool_name=t_name,
+                            tool_args=t_args,
+                            result=result_str,
+                        )
+                        loop_messages.append(
+                            ToolMessage(content=result_str, tool_call_id=t_id)
+                        )
+                content = str(ai_message.content) if ai_message and ai_message.content else ""
+                if content:
+                    yield content
+            else:
+                async for token in self.llm.astream(messages):
+                    content += token
+                    yield token
+        finally:
+            await self.hooks.emit(
+                "post_llm_call",
+                agent=agent,
+                session=session,
+                content=content,
+            )
+            if agent.memory and current_message:
+                await agent.memory.sync_turn(current_message, content)
+
     def preview_soul(self, agent: Agent) -> str:
         """Return the current SOUL.md content for the agent.
 
@@ -429,13 +577,114 @@ class IdavollApp:
                 f"Agent {agent.name!r} has no workspace; call create_agent() first."
             )
         current_text = agent.workspace.read_soul()
-        updated_soul = await self.profile_service.refine(
-            agent.name, current_text, feedback
-        )
+        updated_soul = await refine_soul_spec(self.llm, agent.name, current_text, feedback)
         rendered = ProfileWorkspaceManager.render_soul(agent.profile, updated_soul)
         agent.workspace.write_soul(rendered)
         await self.hooks.emit("soul.refined", agent=agent, feedback=feedback)
         return rendered
+
+    async def refine_soul_stateless(
+        self,
+        name: str,
+        current_soul_text: str,
+        feedback: str,
+    ) -> SoulSpec:
+        """Stateless soul refinement — no agent required (used in preview flow)."""
+        return await refine_soul_spec(self.llm, name, current_soul_text, feedback)
+
+    async def bootstrap_chat(
+        self,
+        name: str,
+        messages: list[dict],
+    ) -> tuple[str, str | None]:
+        """Drive one turn of the bootstrap conversation.
+
+        Returns ``(reply, soul_text)`` where ``soul_text`` is the extracted
+        SOUL.md content when the designer has collected enough information,
+        otherwise ``None``.
+        """
+        from langchain_core.messages import AIMessage as _AI, HumanMessage as _H, SystemMessage as _S
+
+        lc = [_S(content=BOOTSTRAP_SYSTEM.replace("{name}", name))]
+        for m in messages:
+            role = m.get("role", "user")
+            content = m.get("content", "")
+            lc.append(_H(content=content) if role == "user" else _AI(content=content))
+
+        try:
+            raw: str = await self.llm.generate(lc, run_name="agent-bootstrap-chat")
+        except Exception:
+            logger.exception("bootstrap_chat: LLM call failed for %r", name)
+            return ("抱歉，出了点问题，请重试。", None)
+
+        soul_text: str | None = None
+        reply = raw.strip()
+        if BOOTSTRAP_SENTINEL in raw:
+            m = __import__("re").search(r"<SOUL>(.*?)</SOUL>", raw, __import__("re").DOTALL)
+            if m:
+                soul_text = m.group(1).strip()
+                reply = raw[: raw.index(BOOTSTRAP_SENTINEL)].strip()
+                if not reply:
+                    reply = "已为你生成 SOUL.md 草稿，请查看右侧预览！"
+        return (reply, soul_text)
+
+    async def bootstrap_chat_stream(
+        self,
+        name: str,
+        messages: list[dict],
+    ) -> AsyncGenerator[str, None]:
+        """Streaming variant of bootstrap_chat — yields SSE lines.
+
+        Event shapes:
+        * ``{"type": "token",  "delta": "..."}``
+        * ``{"type": "soul",   "text":  "..."}``
+        * ``{"type": "error",  "message": "..."}``
+        * ``{"type": "done"}``
+        """
+        from langchain_core.messages import AIMessage as _AI, HumanMessage as _H, SystemMessage as _S
+
+        def _sse(obj: dict) -> str:
+            return f"data: {json.dumps(obj, ensure_ascii=False)}\n\n"
+
+        lc = [_S(content=BOOTSTRAP_SYSTEM.replace("{name}", name))]
+        for m in messages:
+            role = m.get("role", "user")
+            content = m.get("content", "")
+            lc.append(_H(content=content) if role == "user" else _AI(content=content))
+
+        HOLD = len(BOOTSTRAP_SENTINEL) - 1
+        hold = ""
+        soul_buf: str | None = None
+
+        try:
+            async for token in self.llm.astream(lc, run_name="agent-bootstrap-stream"):
+                if soul_buf is not None:
+                    soul_buf += token
+                    if BOOTSTRAP_SENTINEL_END in soul_buf:
+                        soul_text = soul_buf[: soul_buf.index(BOOTSTRAP_SENTINEL_END)].strip()
+                        yield _sse({"type": "soul", "text": soul_text})
+                        soul_buf = None
+                        break
+                else:
+                    hold += token
+                    if BOOTSTRAP_SENTINEL in hold:
+                        pre = hold[: hold.index(BOOTSTRAP_SENTINEL)]
+                        if pre:
+                            yield _sse({"type": "token", "delta": pre})
+                        soul_buf = hold[hold.index(BOOTSTRAP_SENTINEL) + len(BOOTSTRAP_SENTINEL) :]
+                        hold = ""
+                    elif len(hold) > HOLD:
+                        safe, hold = hold[:-HOLD], hold[-HOLD:]
+                        yield _sse({"type": "token", "delta": safe})
+
+            if soul_buf is None and hold:
+                yield _sse({"type": "token", "delta": hold})
+
+        except Exception:
+            logger.exception("bootstrap_chat_stream: failed for %r", name)
+            yield _sse({"type": "error", "message": "抱歉，出了点问题，请重试。"})
+
+        yield _sse({"type": "done"})
 
     async def close_session(
         self,

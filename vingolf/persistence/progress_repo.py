@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 from ..progress import AgentProgress
 
 if TYPE_CHECKING:
-    from idavoll.persistence.database import Database
+    from .database import Database
 
 
 class AgentProgressRepository:

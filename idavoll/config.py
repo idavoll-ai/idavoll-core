@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field, SecretStr, model_validator
 class LLMConfig(BaseModel):
     """Settings for the underlying chat model."""
 
-    provider: Literal["anthropic", "openai", "deepseek", "kimi"] = "anthropic"
+    provider: Literal["anthropic", "openai", "deepseek", "kimi", "siliconflow"] = "anthropic"
     model: str = "claude-haiku-4-5-20251001"
     temperature: float = 0.7
     max_tokens: int = 1024

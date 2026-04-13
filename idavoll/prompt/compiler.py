@@ -206,10 +206,9 @@ class PromptCompiler:
         # Fallback: bare name list from workspace
         if agent.workspace is None:
             return ""
-        skill_files = agent.workspace.list_skills()
-        if not skill_files:
+        names = agent.workspace.list_skill_names()
+        if not names:
             return ""
-        names = [f.parent.name for f in skill_files]
         index = "\n".join(f"- {name}" for name in names)
         return f"## Skills Index\n\n{index}"
 

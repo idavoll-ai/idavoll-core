@@ -172,6 +172,20 @@ export function TopicDetailPage() {
 
 // ── Posts Thread ─────────────────────────────────────────
 
+function buildTree(posts: PostOut[]): { roots: PostOut[]; children: Record<string, PostOut[]> } {
+  const children: Record<string, PostOut[]> = {}
+  const roots: PostOut[] = []
+  for (const p of posts) {
+    if (p.reply_to) {
+      if (!children[p.reply_to]) children[p.reply_to] = []
+      children[p.reply_to].push(p)
+    } else {
+      roots.push(p)
+    }
+  }
+  return { roots, children }
+}
+
 function PostsThread({ posts, topicId, isClosed, onPosted }: {
   posts: PostOut[]
   topicId: string
@@ -184,6 +198,7 @@ function PostsThread({ posts, topicId, isClosed, onPosted }: {
   const [authorName, setAuthorName] = useState('User')
 
   const postMap = Object.fromEntries(posts.map(p => [p.id, p]))
+  const { roots, children } = buildTree(posts)
 
   const handleSend = async () => {
     if (!content.trim()) return
@@ -208,12 +223,13 @@ function PostsThread({ posts, topicId, isClosed, onPosted }: {
         </div>
       ) : (
         <div className="posts-thread">
-          {posts.map(p => (
-            <PostItem
+          {roots.map(p => (
+            <PostTree
               key={p.id}
               post={p}
-              replyTarget={p.reply_to ? postMap[p.reply_to] : undefined}
-              onReply={() => setReplyTo(p.id)}
+              children={children}
+              depth={0}
+              onReply={(id) => setReplyTo(id)}
             />
           ))}
         </div>
@@ -262,14 +278,51 @@ function PostsThread({ posts, topicId, isClosed, onPosted }: {
   )
 }
 
-function PostItem({ post, replyTarget, onReply }: {
+function PostTree({ post, children, depth, onReply }: {
   post: PostOut
-  replyTarget?: PostOut
+  children: Record<string, PostOut[]>
+  depth: number
+  onReply: (id: string) => void
+}) {
+  const replies = children[post.id] ?? []
+  const [collapsed, setCollapsed] = useState(false)
+
+  return (
+    <div style={{ marginLeft: depth > 0 ? 24 : 0, borderLeft: depth > 0 ? '2px solid var(--border)' : 'none', paddingLeft: depth > 0 ? 12 : 0 }}>
+      <PostItem
+        post={post}
+        hasReplies={replies.length > 0}
+        collapsed={collapsed}
+        onToggleCollapse={() => setCollapsed(v => !v)}
+        onReply={() => onReply(post.id)}
+      />
+      {!collapsed && replies.length > 0 && (
+        <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {replies.map(r => (
+            <PostTree
+              key={r.id}
+              post={r}
+              children={children}
+              depth={depth + 1}
+              onReply={onReply}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function PostItem({ post, hasReplies, collapsed, onToggleCollapse, onReply }: {
+  post: PostOut
+  hasReplies: boolean
+  collapsed: boolean
+  onToggleCollapse: () => void
   onReply: () => void
 }) {
   const isAgent = post.source === 'agent'
   return (
-    <div className={`post-item ${post.reply_to ? 'is-reply' : ''}`}>
+    <div className="post-item">
       <div className="post-header">
         <div className={`post-author-avatar ${isAgent ? 'is-agent' : ''}`}>
           {post.author_name[0]?.toUpperCase()}
@@ -278,11 +331,6 @@ function PostItem({ post, replyTarget, onReply }: {
           <div className="post-author-name">{post.author_name}</div>
         </div>
         <span className="post-source-badge">{isAgent ? 'Agent' : 'User'}</span>
-        {replyTarget && (
-          <span className="text-sm text-muted" style={{ marginLeft: 4 }}>
-            → {replyTarget.author_name}
-          </span>
-        )}
       </div>
       <div className="post-content">{post.content}</div>
       <div className="post-footer">
@@ -290,6 +338,11 @@ function PostItem({ post, replyTarget, onReply }: {
         <button className="btn btn-ghost btn-sm" onClick={onReply} style={{ fontSize: 12 }}>
           回复
         </button>
+        {hasReplies && (
+          <button className="btn btn-ghost btn-sm" onClick={onToggleCollapse} style={{ fontSize: 12, color: 'var(--muted-foreground)' }}>
+            {collapsed ? '▶ 展开回复' : '▼ 收起回复'}
+          </button>
+        )}
       </div>
     </div>
   )

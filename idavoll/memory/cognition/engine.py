@@ -208,10 +208,8 @@ class ExperienceConsolidator:
             f"## Key Points\n\n{raw.strip()}\n"
         )
 
-        summary_path = agent.workspace.session_path(session.id)
-        summary_path.parent.mkdir(parents=True, exist_ok=True)
-        summary_path.write_text(summary_md, encoding="utf-8")
-        return str(summary_path)
+        agent.workspace.write_session_summary(session.id, summary_md)
+        return f"sessions/{session.id}.md"
 
     # ------------------------------------------------------------------
     # Skill extraction

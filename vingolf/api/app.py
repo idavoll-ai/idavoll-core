@@ -1,16 +1,25 @@
 """FastAPI application factory for Vingolf."""
 from __future__ import annotations
 
-import os
+import logging
+import traceback
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from vingolf.api import state
 from vingolf.api.routers import agents, topics
+
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%H:%M:%S",
+)
+logger = logging.getLogger("vingolf.api")
 
 
 def create_app(
@@ -34,10 +43,13 @@ def create_app(
     async def lifespan(app: FastAPI):  # noqa: ARG001
         from vingolf.app import VingolfApp
 
-        resolved_key = api_key or os.getenv("ANTHROPIC_API_KEY")
+        # Only pass an explicit api_key; each provider's LangChain client
+        # handles its own env-var fallback (ANTHROPIC_API_KEY / OPENAI_API_KEY).
+        # Injecting ANTHROPIC_API_KEY here would overwrite keys from config
+        # when using non-Anthropic providers (e.g. siliconflow).
         vingolf = VingolfApp.from_yaml(
             config_path,
-            api_key=resolved_key,
+            api_key=api_key,
         )
         await vingolf.startup()
         state.set_app(vingolf)
@@ -61,10 +73,23 @@ def create_app(
         allow_headers=["*"],
     )
 
-    app.include_router(agents.router)
-    app.include_router(topics.router)
+    @app.exception_handler(Exception)
+    async def _unhandled_exception(request: Request, exc: Exception) -> JSONResponse:
+        tb = traceback.format_exc()
+        logger.error("Unhandled exception on %s %s\n%s", request.method, request.url.path, tb)
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error": type(exc).__name__,
+                "detail": str(exc),
+                "traceback": tb,
+            },
+        )
 
-    @app.get("/health", tags=["meta"])
+    app.include_router(agents.router, prefix="/api")
+    app.include_router(topics.router, prefix="/api")
+
+    @app.get("/api/health", tags=["meta"])
     def health() -> dict[str, Any]:
         vingolf = state.get_app()
         return {

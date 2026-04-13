@@ -9,8 +9,8 @@ from past sessions.
 
 Data source
 -----------
-The Self-Growth Engine writes one markdown summary per closed session under
-``workspace/sessions/{session_id}.md``.  Each file has the shape::
+The Self-Growth Engine writes one markdown summary per closed session via
+``workspace.write_session_summary()``.  Each document has the shape::
 
     # Session Summary
 
@@ -36,8 +36,7 @@ Search strategy (MVP — no embeddings)
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
-from pathlib import Path
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from .context import estimate_tokens
@@ -53,13 +52,12 @@ if TYPE_CHECKING:
 
 @dataclass(slots=True)
 class SessionRecord:
-    """A parsed session summary loaded from disk."""
+    """A parsed session summary."""
 
     session_id: str
     date: str
     participants: str
     key_points: str   # raw bullet-list text from the ## Key Points section
-    path: Path
 
 
 # ---------------------------------------------------------------------------
@@ -67,25 +65,24 @@ class SessionRecord:
 # ---------------------------------------------------------------------------
 
 
-def _parse_summary(text: str, path: Path) -> SessionRecord | None:
-    """Parse a session summary markdown file into a SessionRecord.
+def _parse_summary(text: str, session_id: str) -> SessionRecord | None:
+    """Parse a session summary document into a SessionRecord.
 
-    Returns None if the file is malformed or empty.
+    Returns None if the document is malformed or empty.
     """
     if not text.strip():
         return None
 
-    session_id = _extract_field(text, "Session ID") or path.stem
+    sid = _extract_field(text, "Session ID") or session_id
     date = _extract_field(text, "Date") or ""
     participants = _extract_field(text, "Participants") or ""
     key_points = _extract_section(text, "Key Points")
 
     return SessionRecord(
-        session_id=session_id,
+        session_id=sid,
         date=date,
         participants=participants,
         key_points=key_points,
-        path=path,
     )
 
 
@@ -135,7 +132,7 @@ class SessionSearch:
         token_budget: int = 300,
         max_results: int = 3,
     ) -> None:
-        self._sessions_dir = workspace.sessions_dir
+        self._workspace = workspace
         self._token_budget = token_budget
         self._max_results = max_results
 
@@ -185,7 +182,7 @@ class SessionSearch:
         return f"<session-context>\n{body}\n</session-context>"
 
     def list_all(self) -> list[SessionRecord]:
-        """Return all parsed session records, sorted newest-first by filename."""
+        """Return all parsed session records, sorted newest-first."""
         return self._load_all()
 
     # ------------------------------------------------------------------
@@ -193,14 +190,16 @@ class SessionSearch:
     # ------------------------------------------------------------------
 
     def _load_all(self) -> list[SessionRecord]:
-        if not self._sessions_dir.exists():
-            return []
+        """Load all session summaries via the workspace semantic API.
+
+        workspace.list_session_ids() already returns ids newest-first, so
+        most-recent sessions are naturally preferred when scoring ties cause
+        us to hit the token budget.
+        """
         records: list[SessionRecord] = []
-        # Sort descending so most-recent sessions are preferred when scoring
-        # ties occur and we hit the token budget.
-        for path in sorted(self._sessions_dir.glob("*.md"), reverse=True):
-            text = path.read_text(encoding="utf-8")
-            record = _parse_summary(text, path)
+        for session_id in self._workspace.list_session_ids():
+            text = self._workspace.read_session_summary(session_id)
+            record = _parse_summary(text, session_id)
             if record is not None:
                 records.append(record)
         return records
@@ -218,9 +217,7 @@ def _tokenize(text: str) -> list[str]:
     whitespace/punctuation while also keeping individual CJK characters
     as tokens.
     """
-    # Collect space-separated words
-    words = re.findall(r"\w+", text.lower())
-    return words
+    return re.findall(r"\w+", text.lower())
 
 
 def _score(record: SessionRecord, query_tokens: list[str]) -> int:

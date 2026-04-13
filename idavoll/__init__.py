@@ -1,5 +1,5 @@
 from .agent.workspace import ProfileWorkspace, ProfileWorkspaceManager
-from .app import AgentProfileService, IdavollApp, JobScheduler, SessionManager
+from .app import IdavollApp, JobScheduler, SessionManager
 from .config import (
     CompressionConfig,
     IdavollConfig,
@@ -17,7 +17,6 @@ from .prompt import PromptCompiler
 from .skills import Skill, SkillsLibrary
 
 __all__ = [
-    "AgentProfileService",
     "BuiltinMemoryProvider",
     "ConsolidationResult",
     "CompressionConfig",

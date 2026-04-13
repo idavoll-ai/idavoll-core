@@ -9,7 +9,7 @@ import aiosqlite
 # Schema
 # ---------------------------------------------------------------------------
 
-_CORE_SCHEMA = """
+_SCHEMA = """
 CREATE TABLE IF NOT EXISTS agents (
     id                   TEXT PRIMARY KEY,
     name                 TEXT NOT NULL,
@@ -22,9 +22,7 @@ CREATE TABLE IF NOT EXISTS agents (
     disabled_tools       TEXT NOT NULL DEFAULT '[]',
     created_at           TEXT NOT NULL DEFAULT (datetime('now'))
 );
-"""
 
-_VINGOLF_SCHEMA = """
 CREATE TABLE IF NOT EXISTS topics (
     id           TEXT PRIMARY KEY,
     session_id   TEXT NOT NULL,
@@ -71,12 +69,12 @@ CREATE TABLE IF NOT EXISTS agent_progress (
 
 
 class Database:
-    """Async SQLite connection manager.
+    """Async SQLite connection manager for Vingolf.
 
     Usage::
 
         db = Database("vingolf.db")
-        await db.init()           # create tables
+        await db.init()           # open connection + ensure tables exist
         async with db.conn() as c:
             await c.execute(...)
         await db.close()
@@ -98,7 +96,7 @@ class Database:
         self._db.row_factory = aiosqlite.Row
         await self._db.execute("PRAGMA journal_mode=WAL")
         await self._db.execute("PRAGMA foreign_keys=ON")
-        await self._db.executescript(_CORE_SCHEMA + _VINGOLF_SCHEMA)
+        await self._db.executescript(_SCHEMA)
         await self._db.commit()
 
     async def close(self) -> None:

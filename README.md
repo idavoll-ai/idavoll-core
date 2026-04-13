@@ -65,13 +65,16 @@ pre_tool_call / post_tool_call	未实现（无工具执行环）
 > 第三个是 关于 XP/Level 的成长设计，等级越高的 Agent 有越多的Tool调用以及Skills 理解，同时还有知识库的搭建，这些 至少我们基础的 Core 得支持
 - [x] 持久化
 - [ ] Review Timing -- 现有评审触发时机是 Topic Close， 应该 多 Timing 设计
+- [ ] 现在出现一个问题，比如说A和B一起对话的时候，A的相关回答内容会污染B的回答，such as：
+  ![A-B对话](./assets/image.png)
 
 ---
 
 ### 未完成（低优先级）
-- [ ] 流式输出的支持
+- [x] 流式输出的支持 —— `LLMAdapter.astream()` + `IdavollApp.generate_response_stream()`
 - [ ] 后续的发展 得 将组件封装成 开发者不需要了解内部就能用"的高层 API (IMPORTANT)
 - [ ] 如果一个人有3个 Agents,那么 App 中就要加3个Agents，那我如果1w人，就需要加3w个Agents，考虑一下 短暂需求上是否需要考虑内存占用过大的问题
+- [ ] WorkspaceBackend 抽象（Phase 3）—— 当前 `ProfileWorkspace` 已完成语义收口（Phase 1/2），内部仍直接读写文件系统。下一步提取 `WorkspaceBackend` Protocol（`read_text / write_text / list_keys / exists`），让 `ProfileWorkspace` 只做语义键名映射（`"skill/foo"` → `skills/foo/SKILL.md`），底层可插入 SQLite / S3 等后端。上层消费者（`SkillsLibrary`、`SessionSearch` 等）无需改动。
 - [ ] External Memory Provider —— 接入 Honcho / Mem0 等语义记忆后端的标准 Provider 接口
 - [ ] 接入知识库 Rag 等等，但是最好先别做，过于臃肿了
 - [ ] 多 Agent 协作	⚠️ Vingolf 独有	换一个产品场景要重写， 是不是抽象程度不够，到后续迭代的话再考虑，比如说 Idavoll-v2 ....

@@ -5,12 +5,11 @@ from typing import TYPE_CHECKING
 
 from idavoll.app import IdavollApp
 from idavoll.config import IdavollConfig
-from idavoll.persistence import AgentProfileRepository, Database
 from idavoll.plugin.base import IdavollPlugin
 from idavoll.plugin.hooks import HookBus
 
 from .config import VingolfConfig
-from .persistence import AgentProgressRepository, TopicRepository
+from .persistence import AgentProfileRepository, AgentProgressRepository, Database, TopicRepository
 from .progress import AgentProgress
 from .plugins.leveling import LevelingPlugin
 from .plugins.review import ReviewPlugin
@@ -194,7 +193,11 @@ class VingolfApp:
         self, name: str, messages: list[dict]
     ) -> tuple[str, str | None]:
         """One turn of the bootstrap conversation. Returns (reply, soul_text|None)."""
-        return await self._app.profile_service.bootstrap_chat(name, messages)
+        return await self._app.bootstrap_chat(name, messages)
+
+    def bootstrap_chat_stream(self, name: str, messages: list[dict]):
+        """Streaming variant — returns an async generator of SSE lines."""
+        return self._app.bootstrap_chat_stream(name, messages)
 
     def preview_soul(self, agent: "Agent") -> str:
         """Return the current SOUL.md text so the user can decide what to refine next."""

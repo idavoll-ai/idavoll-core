@@ -100,15 +100,51 @@ class TopicPlugin(IdavollPlugin):
     async def load_state(self) -> None:
         """Restore topics and posts from the DB into memory.
 
-        Call this once after the app is fully initialised (sessions restored,
-        agents loaded) so that in-memory state matches the DB.
+        Sessions are purely in-memory and lost on restart.  For each open
+        topic we recreate a Session, add its member agents as participants,
+        and replay the persisted Posts as Messages so the conversation
+        history is available to the LLM context and ExperienceConsolidator.
         """
         if self.repo is None:
             return
+        app = self._require_app()
         topics = await self.repo.all_topics()
         for topic in topics:
+            posts = await self.repo.get_posts(topic.id)
             self._topics[topic.id] = topic
-            self._posts[topic.id] = await self.repo.get_posts(topic.id)
+            self._posts[topic.id] = posts
+
+            if topic.lifecycle == TopicLifecycle.CLOSED:
+                continue
+
+            # Recreate the session and restore message history from Posts.
+            agents = [
+                a
+                for aid in topic.memberships
+                if (a := app.agents.get(aid)) is not None
+            ]
+            session = app.sessions.create(
+                participants=agents,
+                metadata={},
+                max_context_messages=self._config.max_context_messages,
+            )
+            for post in sorted(posts, key=lambda p: p.created_at):
+                session.add_message(
+                    Message(
+                        id=post.id,
+                        agent_id=post.author_id,
+                        agent_name=post.author_name,
+                        content=post.content,
+                        role="assistant" if post.source == "agent" else "user",
+                        created_at=post.created_at,
+                        metadata={
+                            "topic_id": topic.id,
+                            "post_id": post.id,
+                            "reply_to": post.reply_to,
+                        },
+                    )
+                )
+            topic.session_id = session.id
 
     async def create_topic(
         self,

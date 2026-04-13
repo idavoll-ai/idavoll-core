@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from ..plugins.topic import Post, Topic, TopicLifecycle, TopicMembership
 
 if TYPE_CHECKING:
-    from idavoll.persistence.database import Database
+    from .database import Database
 
 
 def _dt(s: str | None) -> datetime | None:

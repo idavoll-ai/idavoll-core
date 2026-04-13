@@ -69,6 +69,10 @@ class ProfileWorkspace:
           PROJECT.md       = optional project context
           skills/          = reusable workflow skills
           sessions/        = historical session summaries and search index
+
+    All public methods are *semantic* — callers deal in names and content
+    strings, never in filesystem paths.  Path details stay private so the
+    storage backend can be swapped out later without touching any consumer.
     """
 
     SOUL_FILE = "SOUL.md"
@@ -82,99 +86,93 @@ class ProfileWorkspace:
         self._root = root
 
     # ------------------------------------------------------------------
-    # Properties
+    # Root path (for debugging / manager internals only)
     # ------------------------------------------------------------------
 
     @property
     def path(self) -> Path:
         return self._root
 
-    @property
-    def soul_path(self) -> Path:
-        return self._root / self.SOUL_FILE
-
-    @property
-    def memory_path(self) -> Path:
-        return self._root / self.MEMORY_FILE
-
-    @property
-    def user_path(self) -> Path:
-        return self._root / self.USER_FILE
-
-    @property
-    def project_path(self) -> Path:
-        return self._root / self.PROJECT_FILE
-
-    @property
-    def skills_dir(self) -> Path:
-        return self._root / self.SKILLS_DIR
-
-    @property
-    def sessions_dir(self) -> Path:
-        return self._root / self.SESSIONS_DIR
-
     # ------------------------------------------------------------------
-    # Reads
+    # Core document reads
     # ------------------------------------------------------------------
 
     def read_soul(self) -> str:
-        return self._read(self.soul_path)
+        return self._read(self._root / self.SOUL_FILE)
 
     def read_soul_spec(self) -> SoulSpec:
         """Parse SOUL.md into a structured SoulSpec."""
         return parse_soul_markdown(self.read_soul())
 
     def read_memory(self) -> str:
-        return self._read(self.memory_path)
+        return self._read(self._root / self.MEMORY_FILE)
 
     def read_user(self) -> str:
-        return self._read(self.user_path)
+        return self._read(self._root / self.USER_FILE)
 
     def read_project_context(self) -> str:
         """Return PROJECT.md content, or empty string if absent."""
-        return self._read(self.project_path)
+        return self._read(self._root / self.PROJECT_FILE)
 
     # ------------------------------------------------------------------
-    # Writes
+    # Core document writes
     # ------------------------------------------------------------------
 
     def write_memory(self, content: str) -> None:
-        self._write(self.memory_path, content)
+        self._write(self._root / self.MEMORY_FILE, content)
 
     def write_user(self, content: str) -> None:
-        self._write(self.user_path, content)
+        self._write(self._root / self.USER_FILE, content)
 
     def write_soul(self, content: str) -> None:
-        self._write(self.soul_path, content)
+        self._write(self._root / self.SOUL_FILE, content)
 
     def write_soul_spec(self, profile: AgentProfile, soul: SoulSpec) -> None:
         self.write_soul(ProfileWorkspaceManager.render_soul(profile, soul))
 
     # ------------------------------------------------------------------
-    # Skills helpers
+    # Skills — semantic interface (no Path exposed)
     # ------------------------------------------------------------------
 
-    def list_skills(self) -> list[Path]:
-        """Return paths to all SKILL.md files under skills/."""
-        if not self.skills_dir.exists():
+    def list_skill_names(self) -> list[str]:
+        """Return all skill names (kebab-case), sorted alphabetically."""
+        skills_dir = self._root / self.SKILLS_DIR
+        if not skills_dir.exists():
             return []
-        return sorted(self.skills_dir.glob("*/SKILL.md"))
+        return sorted(p.parent.name for p in skills_dir.glob("*/SKILL.md"))
 
-    def skill_path(self, skill_name: str) -> Path:
-        return self.skills_dir / skill_name / "SKILL.md"
+    def skill_exists(self, name: str) -> bool:
+        return (self._root / self.SKILLS_DIR / name / "SKILL.md").exists()
+
+    def read_skill_doc(self, name: str) -> str:
+        """Return raw SKILL.md content for *name*, or '' if absent."""
+        return self._read(self._root / self.SKILLS_DIR / name / "SKILL.md")
+
+    def write_skill_doc(self, name: str, text: str) -> None:
+        """Write raw SKILL.md content for *name*.  Creates directories as needed."""
+        self._write(self._root / self.SKILLS_DIR / name / "SKILL.md", text)
 
     # ------------------------------------------------------------------
-    # Sessions helpers
+    # Sessions — semantic interface (no Path exposed)
     # ------------------------------------------------------------------
 
-    def list_sessions(self) -> list[Path]:
-        """Return paths to all session summary files under sessions/."""
-        if not self.sessions_dir.exists():
+    def list_session_ids(self) -> list[str]:
+        """Return all session IDs (file stems), sorted newest-first."""
+        sessions_dir = self._root / self.SESSIONS_DIR
+        if not sessions_dir.exists():
             return []
-        return sorted(self.sessions_dir.glob("*.md"))
+        return sorted(
+            (p.stem for p in sessions_dir.glob("*.md")),
+            reverse=True,
+        )
 
-    def session_path(self, session_id: str) -> Path:
-        return self.sessions_dir / f"{session_id}.md"
+    def read_session_summary(self, session_id: str) -> str:
+        """Return raw session summary content for *session_id*, or '' if absent."""
+        return self._read(self._root / self.SESSIONS_DIR / f"{session_id}.md")
+
+    def write_session_summary(self, session_id: str, text: str) -> None:
+        """Write session summary content.  Creates sessions/ directory if needed."""
+        self._write(self._root / self.SESSIONS_DIR / f"{session_id}.md", text)
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -275,7 +273,7 @@ class ProfileWorkspaceManager:
             shutil.rmtree(ws_dir)
 
     # ------------------------------------------------------------------
-    # Internal helpers
+    # Rendering
     # ------------------------------------------------------------------
 
     @staticmethod

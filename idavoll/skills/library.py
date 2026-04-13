@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .model import Skill, parse_skill, render_skill, to_kebab
@@ -15,28 +14,24 @@ def _now_iso() -> str:
 
 
 class SkillsLibrary:
-    """Manages the Agent's skills/ directory.
+    """Manages the Agent's skills collection via the workspace semantic API.
 
-    Each skill lives in its own subdirectory::
-
-        skills/
-          <name>/
-            SKILL.md
+    Each skill is stored as a SKILL.md document identified by its kebab-case
+    name.  All filesystem details are hidden behind the workspace interface —
+    SkillsLibrary never touches paths directly.
 
     Lifecycle methods
     -----------------
     create  — add a new skill; raises ``FileExistsError`` if name taken.
     patch   — update an existing skill's fields without full replacement.
-    archive — mark a skill inactive (keeps the file; just sets status).
+    archive — mark a skill inactive (keeps the document; just sets status).
     get     — load a skill by name, or ``None`` if not found.
     list_active — all non-archived skills.
     build_index — compact markdown string for the static system prompt.
     """
 
-    SKILL_FILENAME = "SKILL.md"
-
     def __init__(self, workspace: "ProfileWorkspace") -> None:
-        self._skills_dir = workspace.skills_dir
+        self._workspace = workspace
 
     # ------------------------------------------------------------------
     # CRUD
@@ -51,13 +46,10 @@ class SkillsLibrary:
     ) -> Skill:
         """Create a new skill.  Raises ``FileExistsError`` if name already exists."""
         name = to_kebab(name)
-        skill_dir = self._skills_dir / name
-        if skill_dir.exists():
+        if self._workspace.skill_exists(name):
             raise FileExistsError(
                 f"Skill {name!r} already exists. Use patch() to update it."
             )
-        skill_dir.mkdir(parents=True, exist_ok=False)
-
         now = _now_iso()
         skill = Skill(
             name=name,
@@ -67,7 +59,6 @@ class SkillsLibrary:
             status="active",
             created_at=now,
             updated_at=now,
-            path=skill_dir / self.SKILL_FILENAME,
         )
         self._write(skill)
         return skill
@@ -102,30 +93,22 @@ class SkillsLibrary:
 
     def get(self, name: str) -> Skill | None:
         """Return the named skill, or ``None`` if it does not exist."""
-        path = self._skill_path(to_kebab(name))
-        if not path.exists():
+        name = to_kebab(name)
+        if not self._workspace.skill_exists(name):
             return None
-        return parse_skill(path.read_text(encoding="utf-8"), path=path)
+        return parse_skill(self._workspace.read_skill_doc(name), name=name)
 
     def list_active(self) -> list[Skill]:
         """Return all skills with ``status == 'active'``, sorted by name."""
-        skills: list[Skill] = []
-        if not self._skills_dir.exists():
-            return skills
-        for skill_file in sorted(self._skills_dir.glob(f"*/{self.SKILL_FILENAME}")):
-            skill = parse_skill(skill_file.read_text(encoding="utf-8"), path=skill_file)
-            if skill.status == "active":
-                skills.append(skill)
-        return skills
+        return [
+            skill
+            for skill in self._load_all()
+            if skill.status == "active"
+        ]
 
     def list_all(self) -> list[Skill]:
         """Return all skills regardless of status."""
-        skills: list[Skill] = []
-        if not self._skills_dir.exists():
-            return skills
-        for skill_file in sorted(self._skills_dir.glob(f"*/{self.SKILL_FILENAME}")):
-            skills.append(parse_skill(skill_file.read_text(encoding="utf-8"), path=skill_file))
-        return skills
+        return self._load_all()
 
     # ------------------------------------------------------------------
     # Prompt index
@@ -159,16 +142,17 @@ class SkillsLibrary:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _skill_path(self, name: str) -> Path:
-        return self._skills_dir / name / self.SKILL_FILENAME
+    def _load_all(self) -> list[Skill]:
+        return [
+            parse_skill(self._workspace.read_skill_doc(name), name=name)
+            for name in self._workspace.list_skill_names()
+        ]
 
     def _load_or_raise(self, name: str) -> Skill:
         name = to_kebab(name)
-        path = self._skill_path(name)
-        if not path.exists():
+        if not self._workspace.skill_exists(name):
             raise FileNotFoundError(f"Skill {name!r} not found.")
-        return parse_skill(path.read_text(encoding="utf-8"), path=path)
+        return parse_skill(self._workspace.read_skill_doc(name), name=name)
 
     def _write(self, skill: Skill) -> None:
-        assert skill.path is not None
-        skill.path.write_text(render_skill(skill), encoding="utf-8")
+        self._workspace.write_skill_doc(skill.name, render_skill(skill))

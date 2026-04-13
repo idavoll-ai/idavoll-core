@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
 
 from vingolf.api import state
 from vingolf.api.schemas import (
@@ -35,6 +36,28 @@ def _agent_out(app, agent) -> AgentOut:
 # Bootstrap conversation (对话式创建 SOUL.md，Agent 创建前调用)
 # ---------------------------------------------------------------------------
 
+@router.post("/bootstrap/stream")
+async def bootstrap_chat_stream(body: BootstrapChatRequest) -> StreamingResponse:
+    """对话式设计 SOUL.md — SSE 流式版本。
+
+    每个事件格式：``data: {"type": "token"|"soul"|"error"|"done", ...}``
+    """
+    app = state.get_app()
+
+    async def _gen():
+        async for line in app.bootstrap_chat_stream(
+            body.name,
+            [m.model_dump() for m in body.messages],
+        ):
+            yield line
+
+    return StreamingResponse(
+        _gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 @router.post("/bootstrap/chat", response_model=BootstrapChatResponse)
 async def bootstrap_chat(body: BootstrapChatRequest) -> BootstrapChatResponse:
     """对话式设计 SOUL.md。
@@ -64,7 +87,7 @@ async def refine_soul_text(body: RefineSoulTextRequest) -> SoulPreviewOut:
     from idavoll.agent.profile import AgentProfile
     from idavoll.agent.workspace import ProfileWorkspaceManager
     app = state.get_app()
-    soul_spec = await app._app.profile_service.refine(
+    soul_spec = await app._app.refine_soul_stateless(
         body.name, body.current_soul, body.feedback
     )
     tmp_profile = AgentProfile(name=body.name)
