@@ -5,11 +5,12 @@ Covers:
 - ToolsetManager: define toolsets, resolve, build_index, unlock_toolset
 - AgentRegistry: register, unlock_toolset
 - SkillsLibrary: create, get, patch, archive, list_active, build_index
-- Builtin tools: skill_get, skill_patch (sync); memory_write, memory_search (async)
+- Builtin tools: skill_get, skill_patch (sync); memory, session_search (async)
 """
 from __future__ import annotations
 
 import asyncio
+import json
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -444,7 +445,7 @@ class TestBuiltinSkillTools:
 
 
 # ---------------------------------------------------------------------------
-# Builtin tools — memory_write / memory_search (async)
+# Builtin tools — memory (unified, async) + session_search (async)
 # ---------------------------------------------------------------------------
 
 
@@ -453,55 +454,111 @@ class TestBuiltinMemoryTools:
         profile = AgentProfile(name="MemTestAgent")
         agent = Agent(profile=profile)
         mock_memory = MagicMock()
-        mock_memory.write_fact = AsyncMock(return_value=None)
-        mock_memory.prefetch = AsyncMock(return_value="记忆内容：用户喜欢简洁回复")
+        mock_memory.write_fact = MagicMock(return_value=True)
+        mock_memory.replace_fact = MagicMock(return_value=True)
+        mock_memory.remove_fact = MagicMock(return_value=True)
+        mock_memory.read_facts = MagicMock(return_value=["用户叫小明"])
         agent.memory = mock_memory
         return agent, mock_memory
 
-    def test_memory_write_calls_write_fact(self) -> None:
-        from idavoll.tools.builtin.memory import memory_write
+    def _run(self, coro):
+        return asyncio.get_event_loop().run_until_complete(coro)
+
+    def test_memory_add_calls_write_fact(self) -> None:
+        from idavoll.tools.builtin.memory import memory
 
         agent, mock_memory = self._make_agent_with_memory()
-        result = asyncio.get_event_loop().run_until_complete(
-            memory_write("用户叫小明", _agent=agent)
-        )
-        mock_memory.write_fact.assert_awaited_once_with("用户叫小明")
-        assert "已写入" in result
+        result = self._run(memory("add", content="用户叫小明", _agent=agent))
+        mock_memory.write_fact.assert_called_once_with("用户叫小明", "memory")
+        data = json.loads(result)
+        assert data["success"] is True
 
-    def test_memory_write_no_memory(self) -> None:
-        from idavoll.tools.builtin.memory import memory_write
+    def test_memory_add_no_content(self) -> None:
+        from idavoll.tools.builtin.memory import memory
+
+        agent, _ = self._make_agent_with_memory()
+        result = self._run(memory("add", _agent=agent))
+        data = json.loads(result)
+        assert data["success"] is False
+        assert "content" in data["error"]
+
+    def test_memory_replace(self) -> None:
+        from idavoll.tools.builtin.memory import memory
+
+        agent, mock_memory = self._make_agent_with_memory()
+        result = self._run(memory("replace", old_text="叫小明", content="用户叫小红", _agent=agent))
+        mock_memory.replace_fact.assert_called_once_with("叫小明", "用户叫小红", "memory")
+        data = json.loads(result)
+        assert data["success"] is True
+
+    def test_memory_replace_not_found(self) -> None:
+        from idavoll.tools.builtin.memory import memory
+
+        agent, mock_memory = self._make_agent_with_memory()
+        mock_memory.replace_fact = MagicMock(return_value=False)
+        result = self._run(memory("replace", old_text="不存在", content="新内容", _agent=agent))
+        data = json.loads(result)
+        assert data["success"] is False
+
+    def test_memory_remove(self) -> None:
+        from idavoll.tools.builtin.memory import memory
+
+        agent, mock_memory = self._make_agent_with_memory()
+        result = self._run(memory("remove", old_text="叫小明", _agent=agent))
+        mock_memory.remove_fact.assert_called_once_with("叫小明", "memory")
+        data = json.loads(result)
+        assert data["success"] is True
+
+    def test_memory_read(self) -> None:
+        from idavoll.tools.builtin.memory import memory
+
+        agent, mock_memory = self._make_agent_with_memory()
+        result = self._run(memory("read", _agent=agent))
+        mock_memory.read_facts.assert_called_with("memory")
+        data = json.loads(result)
+        assert data["success"] is True
+        assert data["entries"] == ["用户叫小明"]
+
+    def test_memory_no_provider(self) -> None:
+        from idavoll.tools.builtin.memory import memory
 
         agent = Agent(profile=AgentProfile(name="NoMem"))
-        result = asyncio.get_event_loop().run_until_complete(
-            memory_write("something", _agent=agent)
-        )
-        assert "没有配置" in result
+        result = self._run(memory("add", content="x", _agent=agent))
+        data = json.loads(result)
+        assert data["success"] is False
+        assert "没有配置" in data["error"]
 
-    def test_memory_search_returns_result(self) -> None:
-        from idavoll.tools.builtin.memory import memory_search
+    def test_memory_unknown_action(self) -> None:
+        from idavoll.tools.builtin.memory import memory
 
-        agent, mock_memory = self._make_agent_with_memory()
-        result = asyncio.get_event_loop().run_until_complete(
-            memory_search("用户偏好", _agent=agent)
-        )
-        mock_memory.prefetch.assert_awaited_once()
-        assert "记忆内容" in result
+        agent, _ = self._make_agent_with_memory()
+        result = self._run(memory("fly", _agent=agent))
+        data = json.loads(result)
+        assert data["success"] is False
 
-    def test_memory_search_no_result(self) -> None:
-        from idavoll.tools.builtin.memory import memory_search
+    def test_session_search_returns_result(self) -> None:
+        from idavoll.tools.builtin.memory import session_search
 
-        agent, mock_memory = self._make_agent_with_memory()
-        mock_memory.prefetch = AsyncMock(return_value="")
-        result = asyncio.get_event_loop().run_until_complete(
-            memory_search("空查询", _agent=agent)
-        )
+        agent = Agent(profile=AgentProfile(name="SearchAgent"))
+        mock_ss = MagicMock()
+        mock_ss.search = AsyncMock(return_value="<session-context>过去的结论</session-context>")
+        agent.session_search = mock_ss
+        result = self._run(session_search("话题相关历史", _agent=agent))
+        assert "过去的结论" in result
+
+    def test_session_search_no_result(self) -> None:
+        from idavoll.tools.builtin.memory import session_search
+
+        agent = Agent(profile=AgentProfile(name="SearchAgent"))
+        mock_ss = MagicMock()
+        mock_ss.search = AsyncMock(return_value="")
+        agent.session_search = mock_ss
+        result = self._run(session_search("空查询", _agent=agent))
         assert "未找到" in result
 
-    def test_memory_search_no_memory(self) -> None:
-        from idavoll.tools.builtin.memory import memory_search
+    def test_session_search_no_provider(self) -> None:
+        from idavoll.tools.builtin.memory import session_search
 
-        agent = Agent(profile=AgentProfile(name="NoMem"))
-        result = asyncio.get_event_loop().run_until_complete(
-            memory_search("anything", _agent=agent)
-        )
+        agent = Agent(profile=AgentProfile(name="NoSearch"))
+        result = self._run(session_search("anything", _agent=agent))
         assert "没有配置" in result

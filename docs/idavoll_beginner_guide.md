@@ -23,11 +23,11 @@
 idavoll/
   app.py                       # Core 入口：create_agent / generate_response / close_session
   agent/profile_service.py     # 把自然语言描述转成结构化人格（SOUL）
-  agent/workspace.py           # 每个 Agent 的磁盘工作区（SOUL.md / MEMORY.md / USER.md / sessions/）
+  agent/workspace.py           # 每个 Agent 的磁盘工作区（SOUL.md / MEMORY.md / USER.md / skills/）
   prompt/compiler.py           # 冻结系统提示 + 每轮动态上下文拼装
   memory/manager.py            # 记忆聚合器
   memory/builtin.py            # MEMORY.md / USER.md 的读写与召回
-  memory/cognition/engine.py   # 会话结束后的成长沉淀（事实/摘要/技能）
+  vingolf/persistence/session_repo.py # 原始 session 持久化与 SQLite 检索
   session/compressor.py        # 上下文压缩
   session/search.py            # 跨会话经验召回
   safety/scanner.py            # 注入/越权模式扫描
@@ -155,7 +155,7 @@ npm install --prefix frontend
 
 - `GET /topics/{id}/review` 的评分结果
 - `GET /agents/{id}/progress` 的经验与等级
-- `workspaces/{agent_id}/sessions/{session_id}.md` 的会话摘要
+- SQLite `session_records` 中的原始会话记录
 
 ---
 
@@ -184,11 +184,11 @@ npm install --prefix frontend
 - `MEMORY.md`：长期事实记忆
 - `USER.md`：用户画像
 - `skills/*/SKILL.md`：可复用技能
-- `sessions/*.md`：每次会话结束摘要
+- SQLite `session_records`：每次会话关闭后的原始对话
 
 学习建议：
 
-每完成一次 `topic close`，都去看一眼 `sessions/` 与 `MEMORY.md`，你会最快理解“成长”到底怎么落地。
+每完成一次 `topic close`，都去看一眼 SQLite `session_records` 与 `MEMORY.md`，你会最快理解“成长”到底怎么落地。
 
 ---
 
@@ -227,7 +227,7 @@ npm install --prefix frontend
 4. `idavoll/app.py`：看 Core 主流程
 5. `idavoll/prompt/compiler.py`：看消息如何拼装
 6. `idavoll/memory/*`：看记忆如何读取、召回、写入
-7. `idavoll/memory/cognition/engine.py`：看会话结束成长
+7. `vingolf/persistence/session_repo.py`：看原始 session 如何落 SQLite 并按需检索
 8. `idavoll/safety/scanner.py`：看防注入规则
 
 每读完一个文件，回答一个问题：

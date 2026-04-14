@@ -33,7 +33,7 @@ BACKEND_PID=$!
 # ── 等待后端就绪 ─────────────────────────────────────────
 echo "[Vingolf]  等待后端启动..."
 for i in $(seq 1 20); do
-  if curl -sf http://localhost:8000/health > /dev/null 2>&1; then
+  if curl -sf http://localhost:8000/api/health > /dev/null 2>&1; then
     echo "[Backend]  已就绪 ✓"
     break
   fi

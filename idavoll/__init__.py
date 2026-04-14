@@ -8,19 +8,13 @@ from .config import (
     SessionConfig,
     WorkspaceConfig,
 )
-from .memory.cognition import (
-    ConsolidationResult,
-    ExperienceConsolidator,
-)
 from .memory import BuiltinMemoryProvider, MemoryManager, MemoryProvider
 from .prompt import PromptCompiler
 from .skills import Skill, SkillsLibrary
 
 __all__ = [
     "BuiltinMemoryProvider",
-    "ConsolidationResult",
     "CompressionConfig",
-    "ExperienceConsolidator",
     "IdavollApp",
     "IdavollConfig",
     "JobScheduler",

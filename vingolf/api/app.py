@@ -15,10 +15,11 @@ from vingolf.api import state
 from vingolf.api.routers import agents, topics
 
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     datefmt="%H:%M:%S",
 )
+logging.getLogger("aiosqlite").setLevel(logging.WARNING)
 logger = logging.getLogger("vingolf.api")
 
 

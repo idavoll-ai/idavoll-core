@@ -64,7 +64,7 @@ await hooks.emit("on_session_start", session=session, participants=participants)
 | `agent.created` | Agent 创建完成后 | `agent` |
 | `agent.loaded` | Agent 从存储加载后 | `agent` |
 | `on_session_start` | Session 创建时 | `session`, `participants` |
-| `on_session_end` | Session 关闭时 | `session`, `results` |
+| `on_session_end` | Session 关闭时 | `session` |
 | `pre_llm_call` | LLM 调用前 | `agent`, `session`, `scene_context`, `current_message` |
 | `post_llm_call` | LLM 调用后 | `agent`, `session`, `content` |
 | `pre_tool_call` | 工具调用前 | `agent`, `session`, `tool_name`, `tool_args` |
@@ -72,7 +72,7 @@ await hooks.emit("on_session_start", session=session, participants=participants)
 | `on_pre_compress` | 会话历史压缩前 | `agent`, `session`, `messages` |
 | `on_memory_write` | 记忆事实写入后 | `agent`, `content`, `target` |
 | `soul.refined` | Soul 精炼完成后 | `agent`, `feedback` |
-| `consolidation.completed` | 经验固化完成后 | `agent`, `session`, `result` |
+| `agent.level_up` | Agent 升级时（Vingolf 产品层） | `agent`, `old_level`, `new_level` |
 
 ---
 

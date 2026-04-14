@@ -120,7 +120,7 @@ class AgentLoader(Protocol):
   USER.md        ← 用户画像（Session 启动时冻结注入）
   PROJECT.md     ← 可选项目背景
   skills/        ← 可复用技能（每个技能一个子目录）
-  sessions/      ← 历史 Session 摘要
+  SQLite `session_records` ← 历史 Session 原始记录（产品层持久化）
 ```
 
 提供对上述所有文件的读写操作，以及 `read_soul_spec()` 直接返回解析后的 `SoulSpec`。

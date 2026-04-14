@@ -25,10 +25,9 @@ class PromptCompiler:
         [1] Voice guidance  (embedded in SOUL.md)
         [2] Optional system message
         [3-5] Frozen memory snapshot  (from MemoryManager.system_prompt_block())
-        [6] Skills Index  (placeholder until Skills Library is ready)
-        [7] Project context  (from workspace PROJECT.md)
-        [8] Tool guidance  (placeholder for future tool-aware instructions)
-        [9] Post instructions
+        [6] Skills Index
+        [7] Tool guidance
+        [8] Post instructions
 
     Dynamic turn — assembled fresh each round and never stored:
         - <memory-context>   (from MemoryManager.prefetch())
@@ -38,8 +37,8 @@ class PromptCompiler:
 
     Safety scanning (§4.2 mvp_design.md)
     --------------------------------------
-    Before any user-editable content (SOUL.md, PROJECT.md, skills) is injected
-    into the frozen prompt, it is passed through a ``SafetyScanner``.  A
+    Before any user-editable content (SOUL.md, skills) is injected into the
+    frozen prompt, it is passed through a ``SafetyScanner``.  A
     ``SafetyScanError`` is raised if any violation is detected, aborting prompt
     compilation.  Pass ``scanner=None`` only in tests that explicitly opt out.
     """
@@ -83,22 +82,17 @@ class PromptCompiler:
             if mem_block.strip():
                 sections.append(mem_block)
 
-        # [6] Skills Index  (placeholder — filled in when Skills Library lands)
+        # [6] Skills Index
         skills_index = self._skills_index(agent, self._scanner)
         if skills_index:
             sections.append(skills_index)
 
-        # [7] Project context
-        project_ctx = self._project_context(agent, self._scanner)
-        if project_ctx:
-            sections.append(project_ctx)
-
-        # [8] Tool guidance
+        # [7] Tool guidance
         tool_block = self._tool_guidance(agent)
         if tool_block:
             sections.append(tool_block)
 
-        # [9] Post instructions
+        # [8] Post instructions
         sections.append("保持人设，自然表达，直接回应当前场景。")
 
         return "\n\n".join(s for s in sections if s.strip())
@@ -211,18 +205,6 @@ class PromptCompiler:
             return ""
         index = "\n".join(f"- {name}" for name in names)
         return f"## Skills Index\n\n{index}"
-
-    @staticmethod
-    def _project_context(agent: "Agent", scanner: SafetyScanner | None) -> str:
-        """Return the PROJECT.md block, or empty string if absent."""
-        if agent.workspace is None:
-            return ""
-        ctx = agent.workspace.read_project_context().strip()
-        if not ctx:
-            return ""
-        if scanner is not None:
-            scanner.scan(ctx, source="PROJECT.md")
-        return f"<project-context>\n{ctx}\n</project-context>"
 
     def _tool_guidance(self, agent: "Agent") -> str:
         """Return the tool index block for slot [8], or empty string.

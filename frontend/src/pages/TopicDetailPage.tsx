@@ -16,6 +16,7 @@ export function TopicDetailPage() {
   const [error, setError] = useState<string | null>(null)
   const [tab, setTab] = useState<'posts' | 'review'>('posts')
   const [closingLoading, setClosingLoading] = useState(false)
+  const [reopeningLoading, setReopeningLoading] = useState(false)
 
   const bottomRef = useRef<HTMLDivElement>(null)
 
@@ -75,6 +76,21 @@ export function TopicDetailPage() {
     }
   }
 
+  const handleReopen = async () => {
+    setReopeningLoading(true)
+    try {
+      const reopened = await topicsApi.reopen(topicId)
+      setTopic(reopened)
+      setReview(null)
+      setTab('posts')
+      setPosts(await topicsApi.listPosts(topicId))
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Reopen failed')
+    } finally {
+      setReopeningLoading(false)
+    }
+  }
+
   return (
     <>
       <div className="page-header">
@@ -99,16 +115,27 @@ export function TopicDetailPage() {
           )}
         </div>
 
-        {!isClosed && (
-          <button
-            className="btn btn-danger"
-            onClick={handleClose}
-            disabled={closingLoading}
-          >
-            {closingLoading ? <Spinner size={14} /> : null}
-            关闭话题
-          </button>
-        )}
+        <div style={{ display: 'flex', gap: 8 }}>
+          {!isClosed ? (
+            <button
+              className="btn btn-danger"
+              onClick={handleClose}
+              disabled={closingLoading}
+            >
+              {closingLoading ? <Spinner size={14} /> : null}
+              关闭话题
+            </button>
+          ) : (
+            <button
+              className="btn btn-secondary"
+              onClick={handleReopen}
+              disabled={reopeningLoading}
+            >
+              {reopeningLoading ? <Spinner size={14} /> : null}
+              重开话题
+            </button>
+          )}
+        </div>
       </div>
 
       <div className="page-body">

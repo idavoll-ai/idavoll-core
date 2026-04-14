@@ -1,8 +1,8 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, type MouseEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { agentsApi } from '@/api/agents'
 import type { AgentOut } from '@/api/types'
-import { LoadingCenter } from '@/components/ui/Spinner'
+import { LoadingCenter, Spinner } from '@/components/ui/Spinner'
 
 function xpForLevel(level: number) {
   return level * 100
@@ -13,6 +13,7 @@ export function AgentsPage() {
   const [agents, setAgents] = useState<AgentOut[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [deleting, setDeleting] = useState<Record<string, boolean>>({})
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -26,6 +27,22 @@ export function AgentsPage() {
   }, [])
 
   useEffect(() => { load() }, [load])
+
+  const handleDelete = async (agent: AgentOut) => {
+    if (!confirm(`确定删除 Agent「${agent.name}」？这会删除 workspace、progress，并将其从已加入的话题中移除。`)) {
+      return
+    }
+    setDeleting(prev => ({ ...prev, [agent.id]: true }))
+    setError(null)
+    try {
+      await agentsApi.remove(agent.id)
+      await load()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Delete failed')
+    } finally {
+      setDeleting(prev => ({ ...prev, [agent.id]: false }))
+    }
+  }
 
   return (
     <>
@@ -54,7 +71,13 @@ export function AgentsPage() {
         ) : (
           <div className="card-grid">
             {agents.map(agent => (
-              <AgentCard key={agent.id} agent={agent} onClick={() => navigate(`/agents/${agent.id}`)} />
+              <AgentCard
+                key={agent.id}
+                agent={agent}
+                onClick={() => navigate(`/agents/${agent.id}`)}
+                onDelete={() => handleDelete(agent)}
+                deleting={!!deleting[agent.id]}
+              />
             ))}
           </div>
         )}
@@ -63,9 +86,20 @@ export function AgentsPage() {
   )
 }
 
-function AgentCard({ agent, onClick }: { agent: AgentOut; onClick: () => void }) {
+function AgentCard({
+  agent,
+  onClick,
+  onDelete,
+  deleting = false,
+}: {
+  agent: AgentOut
+  onClick: () => void
+  onDelete: () => void
+  deleting?: boolean
+}) {
   const maxXp = xpForLevel(agent.level)
   const pct = Math.min(100, (agent.xp % maxXp) / maxXp * 100)
+  const stop = (e: MouseEvent) => e.stopPropagation()
 
   return (
     <div className="agent-card" onClick={onClick}>
@@ -77,6 +111,29 @@ function AgentCard({ agent, onClick }: { agent: AgentOut; onClick: () => void })
             <div className="text-sm text-muted">Lv.{agent.level} · {agent.xp} XP</div>
           </div>
         </div>
+        <button
+          className="btn btn-ghost btn-icon"
+          onClick={(e) => {
+            stop(e)
+            onDelete()
+          }}
+          disabled={deleting}
+          aria-label="删除 Agent"
+          title="删除 Agent"
+          style={{ color: '#dc2626' }}
+        >
+          {deleting ? (
+            <Spinner size={14} />
+          ) : (
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M3 6h18" />
+              <path d="M8 6V4.8C8 3.8 8.8 3 9.8 3h4.4C15.2 3 16 3.8 16 4.8V6" />
+              <path d="M18 6l-1 13a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2L6 6" />
+              <path d="M10 11v6" />
+              <path d="M14 11v6" />
+            </svg>
+          )}
+        </button>
       </div>
       <div className="agent-desc">{agent.description}</div>
       <div className="xp-bar-wrap">

@@ -27,5 +27,7 @@ export const topicsApi = {
   runRound: (topicId: string) => api.post<DecisionOut[]>(`/topics/${topicId}/round`),
 
   close: (topicId: string) => api.post<TopicReviewSummaryOut>(`/topics/${topicId}/close`),
+  reopen: (topicId: string) => api.post<TopicOut>(`/topics/${topicId}/reopen`),
+  remove: (topicId: string) => api.delete<{ ok: boolean }>(`/topics/${topicId}`),
   getReview: (topicId: string) => api.get<TopicReviewSummaryOut>(`/topics/${topicId}/review`),
 }

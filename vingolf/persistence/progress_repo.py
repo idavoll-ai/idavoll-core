@@ -47,3 +47,10 @@ class AgentProgressRepository:
         async with self._db.conn.execute("SELECT * FROM agent_progress") as cur:
             rows = await cur.fetchall()
         return [AgentProgress(agent_id=r["agent_id"], xp=r["xp"], level=r["level"]) for r in rows]
+
+    async def delete(self, agent_id: str) -> None:
+        await self._db.conn.execute(
+            "DELETE FROM agent_progress WHERE agent_id = ?",
+            (agent_id,),
+        )
+        await self._db.conn.commit()

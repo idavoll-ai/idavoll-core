@@ -2,7 +2,7 @@
 
 ## 概述
 
-`idavoll/memory/` 实现 Agent 的记忆系统，分为三层：抽象接口、内置实现、记忆管理器。Session 关闭时由认知引擎（`cognition/engine.py`）驱动事实提取和摘要写入。
+`idavoll/memory/` 实现 Agent 的记忆系统，分为三层：抽象接口、内置实现、记忆管理器。事实写入由 Agent 在对话中通过内置 `memory` 工具主动触发，Session 关闭后由产品层负责持久化原始对话。
 
 ---
 
@@ -81,53 +81,8 @@ manager.add_provider(BuiltinMemoryProvider(workspace))
 
 ---
 
-## 认知引擎（`cognition/engine.py`）
-
-`ExperienceConsolidator` 在 Session 关闭时由 `IdavollApp.close_session()` 调用，驱动完整的经验固化流程（§4.2 / §8.4）。
-
-### 流程
-
-```
-Session 关闭
-    │
-    ├─ 1. 格式化最近 N 条消息为对话文本
-    │
-    ├─ 2. LLM 提取事实 → MemoryManager.write_fact()
-    │      ├─ target="memory"  → MEMORY.md
-    │      └─ target="user"    → USER.md
-    │
-    ├─ 3. LLM 生成 Session 摘要 → workspace/sessions/{id}.md
-    │
-    ├─ 4. LLM 判断是否存在可复用技能 → SkillsLibrary.create/patch()
-    │
-    └─ 5. 触发 consolidation.completed 钩子
-```
-
-### 事实提取原则
-
-- **保留**：偏好、纠正、环境特殊性、反复有效的结论
-- **不保留**：任务日志、临时 TODO、逐步推理过程、单次性细节
-- 每条事实不超过 100 字，表达完整、独立
-
-### ConsolidationResult
-
-记录本次固化的结果：
-
-```python
-@dataclass
-class ConsolidationResult:
-    session_id: str
-    facts_written: int    # 成功写入的事实数
-    facts_skipped: int    # 被跳过（重复）的事实数
-    skills_saved: int     # 保存的技能数
-    summary_path: str     # Session 摘要文件路径
-    errors: list[str]     # 写入时遇到的错误
-```
-
----
-
 ## 设计原则
 
 - **两类记忆正交**：`system_prompt_block()` 是冻结的静态知识；`prefetch()` 是每轮动态召回，二者服务不同目的
-- **写入由认知引擎驱动**：`BuiltinMemoryProvider.sync_turn()` 是 no-op，避免每轮对话都写磁盘
-- **持久化与召回分离**：记忆写入路径（认知引擎 → write_fact）与读取路径（prefetch）完全独立
+- **写入由 Agent 主动触发**：`BuiltinMemoryProvider.sync_turn()` 是 no-op，事实写入通过 Agent 在对话中调用内置 `memory` 工具或产品层在 `on_session_end` 钩子中驱动
+- **持久化与召回分离**：记忆写入路径（write_fact）与读取路径（prefetch）完全独立

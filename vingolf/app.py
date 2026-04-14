@@ -9,7 +9,14 @@ from idavoll.plugin.base import IdavollPlugin
 from idavoll.plugin.hooks import HookBus
 
 from .config import VingolfConfig
-from .persistence import AgentProfileRepository, AgentProgressRepository, Database, TopicRepository
+from .persistence import (
+    AgentProfileRepository,
+    AgentProgressRepository,
+    Database,
+    SessionRecordRepository,
+    SQLiteSessionSearch,
+    TopicRepository,
+)
 from .progress import AgentProgress
 from .plugins.leveling import LevelingPlugin
 from .plugins.review import ReviewPlugin
@@ -43,6 +50,7 @@ class VingolfApp:
         self._agent_repo: AgentProfileRepository | None = None
         self._topic_repo: TopicRepository | None = None
         self._progress_repo: AgentProgressRepository | None = None
+        self._session_repo: SessionRecordRepository | None = None
 
         resolved_plugins = list(plugins or [])
         if not resolved_plugins:
@@ -89,6 +97,7 @@ class VingolfApp:
         self._agent_repo = AgentProfileRepository(db)
         self._topic_repo = TopicRepository(db)
         self._progress_repo = AgentProgressRepository(db)
+        self._session_repo = SessionRecordRepository(db)
 
         # Wire repos into plugins
         if self.topic is not None:
@@ -103,11 +112,30 @@ class VingolfApp:
         @self._app.hooks.hook("agent.created")
         async def _on_agent_created(agent, **_) -> None:
             await self._agent_repo.save(agent.profile)  # type: ignore[union-attr]
+            self._attach_session_search(agent)
+
+        # Hook: attach SQLiteSessionSearch when an agent is loaded from DB
+        @self._app.hooks.hook("agent.loaded")
+        async def _on_agent_loaded(agent, **_) -> None:
+            self._attach_session_search(agent)
 
         # Hook: persist budget changes (level-up expands budget.total)
         @self._app.hooks.hook("agent.level_up")
         async def _on_level_up(agent, **_) -> None:
             await self._agent_repo.save(agent.profile)  # type: ignore[union-attr]
+
+        # Hook: persist raw session conversation to SQLite for all closed sessions
+        @self._app.hooks.hook("on_session_end")
+        async def _on_session_end(session, **_) -> None:
+            await self._persist_session_record(session)
+
+        # Topic.close_topic() emits topic.closed directly without going through
+        # IdavollApp.close_session(), so keep this hook to cover topic-backed
+        # sessions as well.
+        @self._app.hooks.hook("topic.closed")
+        async def _on_topic_closed(topic, session, **_) -> None:
+            del topic
+            await self._persist_session_record(session)
 
         # Restore all known agents into the registry
         for profile in await self._agent_repo.all():
@@ -118,12 +146,44 @@ class VingolfApp:
                     self._app._attach_runtime(agent, workspace)
                 except FileNotFoundError:
                     pass  # workspace not on disk; agent metadata still usable
+                self._attach_session_search(agent)
 
         # Restore topic + leveling state
         if self.topic is not None:
             await self.topic.load_state()
         if self.leveling is not None:
             await self.leveling.load_state()
+
+    def _attach_session_search(self, agent) -> None:
+        """Replace the no-op SessionSearch with the SQLite-backed implementation."""
+        if self._session_repo is not None:
+            agent.session_search = SQLiteSessionSearch(
+                self._session_repo,
+                agent_id=agent.id,
+                llm=self._app.llm,
+            )
+
+    async def _persist_session_record(self, session) -> None:
+        """Upsert one raw closed-session transcript into SQLite."""
+        if self._session_repo is None or not session.messages:
+            return
+
+        participants = ",".join(
+            getattr(p, "id", str(p)) for p in session.participants
+        )
+        conversation = "\n".join(
+            f"[{m.role}] {m.agent_name}: {m.content}"
+            for m in session.messages
+            if (m.content or "").strip()
+        )
+        if not conversation:
+            return
+
+        await self._session_repo.save(
+            session_id=session.id,
+            participants=participants,
+            conversation=conversation,
+        )
 
     async def shutdown(self) -> None:
         """Close the database connection gracefully."""
@@ -271,6 +331,43 @@ class VingolfApp:
     async def close_topic(self, topic_id: str) -> None:
         assert self.topic is not None
         await self.topic.close_topic(topic_id)
+
+    async def reopen_topic(self, topic_id: str) -> Topic:
+        assert self.topic is not None
+        topic = await self.topic.reopen_topic(topic_id)
+        if self.review is not None:
+            self.review.clear_summary(topic_id)
+        return topic
+
+    async def delete_topic(self, topic_id: str) -> None:
+        assert self.topic is not None
+        topic = self.topic.get_topic(topic_id)
+        if topic is None:
+            raise KeyError(f"Topic {topic_id!r} not found")
+        session_id = topic.session_id
+        await self.topic.delete_topic(topic_id)
+        if self.review is not None:
+            self.review.clear_summary(topic_id)
+        if self._session_repo is not None:
+            await self._session_repo.delete(session_id)
+
+    async def delete_agent(self, agent_id: str) -> None:
+        agent = self._app.agents.get(agent_id)
+        if agent is None:
+            raise KeyError(f"Agent {agent_id!r} not found")
+
+        if self.topic is not None:
+            await self.topic.remove_agent_from_topics(agent_id)
+
+        if self.leveling is not None:
+            self.leveling._progress._items.pop(agent_id, None)
+        self._app.agents.delete(agent_id)
+        self._app.workspaces.delete(agent_id)
+
+        if self._progress_repo is not None:
+            await self._progress_repo.delete(agent_id)
+        if self._agent_repo is not None:
+            await self._agent_repo.delete(agent_id)
 
     def get_topic(self, topic_id: str) -> Topic | None:
         assert self.topic is not None

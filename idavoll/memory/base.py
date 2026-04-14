@@ -47,3 +47,27 @@ class MemoryProvider(ABC):
     ) -> bool:
         """Persist a durable fact.  Returns True if written, False if unsupported."""
         return False
+
+    def replace_fact(
+        self,
+        old_text: str,
+        new_content: str,
+        target: Literal["memory", "user"] = "memory",
+    ) -> bool:
+        """Replace an existing fact.  Returns True if replaced, False if unsupported."""
+        return False
+
+    def remove_fact(
+        self,
+        old_text: str,
+        target: Literal["memory", "user"] = "memory",
+    ) -> bool:
+        """Remove an existing fact.  Returns True if removed, False if unsupported."""
+        return False
+
+    def read_facts(
+        self,
+        target: Literal["memory", "user"] = "memory",
+    ) -> list[str]:
+        """Return all current facts.  Returns empty list if unsupported."""
+        return []

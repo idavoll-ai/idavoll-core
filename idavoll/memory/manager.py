@@ -74,3 +74,37 @@ class MemoryManager:
             if provider.write_fact(content, target):
                 return True
         return False
+
+    def replace_fact(
+        self,
+        old_text: str,
+        new_content: str,
+        target: Literal["memory", "user"] = "memory",
+    ) -> bool:
+        """Replace a fact in the first provider that finds a match."""
+        for provider in self._providers:
+            if provider.replace_fact(old_text, new_content, target):
+                return True
+        return False
+
+    def remove_fact(
+        self,
+        old_text: str,
+        target: Literal["memory", "user"] = "memory",
+    ) -> bool:
+        """Remove a fact from the first provider that finds a match."""
+        for provider in self._providers:
+            if provider.remove_fact(old_text, target):
+                return True
+        return False
+
+    def read_facts(
+        self,
+        target: Literal["memory", "user"] = "memory",
+    ) -> list[str]:
+        """Return the fact list from the first provider that has entries."""
+        for provider in self._providers:
+            facts = provider.read_facts(target)
+            if facts:
+                return facts
+        return []

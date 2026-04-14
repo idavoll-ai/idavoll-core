@@ -39,6 +39,7 @@ class TopicRepository:
                                 max_agents, lifecycle, created_at, closed_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
+                session_id   = excluded.session_id,
                 title       = excluded.title,
                 description = excluded.description,
                 tags        = excluded.tags,
@@ -100,6 +101,28 @@ class TopicRepository:
         async with self._db.conn.execute("SELECT * FROM topics ORDER BY created_at") as cur:
             rows = await cur.fetchall()
         return [await self._row_to_topic(r) for r in rows]
+
+    async def delete_topic(self, topic_id: str) -> None:
+        await self._db.conn.execute(
+            "DELETE FROM posts WHERE topic_id = ?",
+            (topic_id,),
+        )
+        await self._db.conn.execute(
+            "DELETE FROM topic_memberships WHERE topic_id = ?",
+            (topic_id,),
+        )
+        await self._db.conn.execute(
+            "DELETE FROM topics WHERE id = ?",
+            (topic_id,),
+        )
+        await self._db.conn.commit()
+
+    async def delete_membership(self, topic_id: str, agent_id: str) -> None:
+        await self._db.conn.execute(
+            "DELETE FROM topic_memberships WHERE topic_id = ? AND agent_id = ?",
+            (topic_id, agent_id),
+        )
+        await self._db.conn.commit()
 
     async def _row_to_topic(self, row) -> Topic:
         async with self._db.conn.execute(

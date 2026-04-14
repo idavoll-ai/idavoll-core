@@ -21,8 +21,8 @@ app = IdavollApp.from_config(config, api_key="...")
 初始化时自动完成：
 
 - 创建所有子系统（HookBus、ToolRegistry、AgentRegistry、Scheduler、LLMAdapter 等）
-- 注册 4 个内置工具（`memory_write/search`、`skill_get/patch`）并定义 `memory`/`skills`/`builtin` 三个工具集
-- 初始化 `PromptCompiler`（含 `SafetyScanner`）、`ExperienceConsolidator`、`ContextCompressor`
+- 注册 4 个内置工具（`memory`、`session_search`、`skill_get`、`skill_patch`）并定义 `memory`/`skills`/`builtin` 三个工具集
+- 初始化 `PromptCompiler`（含 `SafetyScanner`）和 `ContextCompressor`
 
 ---
 
@@ -43,9 +43,10 @@ agent = await app.load_agent(agent_id)
 
 ### 对话生成
 
-`generate_response()` 是核心热路径，在一次调用中完成：
+`generate_response()` 是核心热路径，`generate_response_stream()` 是其流式变体（逐 token yield）：
 
 ```python
+# 普通调用
 content = await app.generate_response(
     agent,
     session=session,          # 可选，提供历史上下文
@@ -54,6 +55,10 @@ content = await app.generate_response(
     memory_context="...",     # 可选，不传时自动 prefetch
     system_message="...",     # 可选，额外系统指令
 )
+
+# 流式调用（有工具时先跑完工具循环，再 yield 最终回复）
+async for token in app.generate_response_stream(agent, session=session, current_message="..."):
+    print(token, end="", flush=True)
 ```
 
 内部执行流程：
@@ -88,8 +93,8 @@ updated_soul = await app.refine_soul(agent, feedback="让她更幽默一些")
 # 创建 Session（触发 on_session_start 钩子）
 session = await app.create_session([agent1, agent2])
 
-# 关闭 Session（触发经验固化 + on_session_end 钩子）
-results = await app.close_session(session)
+# 关闭 Session（触发 on_session_end 钩子；由产品层负责持久化原始对话）
+await app.close_session(session)
 ```
 
 ### 插件与工具
@@ -116,11 +121,11 @@ IdavollApp
 ├── ToolRegistry              ← 全局工具注册表
 ├── ToolsetManager            ← 工具集管理与解析
 ├── PromptCompiler            ← System Prompt 编译（含 SafetyScanner）
-├── AgentProfileService       ← 人格提取与精炼
-├── ExperienceConsolidator    ← Session 后经验固化
 ├── ContextCompressor         ← 会话历史压缩
 └── Scheduler                 ← 异步任务调度
 ```
+
+> 经验固化（事实写入 MEMORY.md、技能提取）由 **产品层** 在 `on_session_end` 钩子中驱动，Core 不再内置 `ExperienceConsolidator`。
 
 ---
 

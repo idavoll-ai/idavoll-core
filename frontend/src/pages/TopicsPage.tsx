@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, type MouseEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { topicsApi } from '@/api/topics'
 import type { CreateTopicRequest, TopicOut } from '@/api/types'
@@ -11,6 +11,8 @@ export function TopicsPage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [showCreate, setShowCreate] = useState(false)
+  const [deleting, setDeleting] = useState<Record<string, boolean>>({})
+  const [reopening, setReopening] = useState<Record<string, boolean>>({})
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -27,6 +29,35 @@ export function TopicsPage() {
 
   const open = topics.filter(t => t.lifecycle !== 'closed')
   const closed = topics.filter(t => t.lifecycle === 'closed')
+
+  const handleDelete = async (topic: TopicOut) => {
+    if (!confirm(`确定删除话题「${topic.title}」？这会删除帖子、成员关系和关联 session 记录。`)) {
+      return
+    }
+    setDeleting(prev => ({ ...prev, [topic.id]: true }))
+    setError(null)
+    try {
+      await topicsApi.remove(topic.id)
+      await load()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Delete failed')
+    } finally {
+      setDeleting(prev => ({ ...prev, [topic.id]: false }))
+    }
+  }
+
+  const handleReopen = async (topic: TopicOut) => {
+    setReopening(prev => ({ ...prev, [topic.id]: true }))
+    setError(null)
+    try {
+      await topicsApi.reopen(topic.id)
+      await load()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Reopen failed')
+    } finally {
+      setReopening(prev => ({ ...prev, [topic.id]: false }))
+    }
+  }
 
   return (
     <>
@@ -61,7 +92,13 @@ export function TopicsPage() {
                 </div>
                 <div className="card-grid">
                   {open.map(t => (
-                    <TopicCard key={t.id} topic={t} onClick={() => navigate(`/topics/${t.id}`)} />
+                    <TopicCard
+                      key={t.id}
+                      topic={t}
+                      onClick={() => navigate(`/topics/${t.id}`)}
+                      onDelete={() => handleDelete(t)}
+                      deleting={!!deleting[t.id]}
+                    />
                   ))}
                 </div>
               </section>
@@ -73,7 +110,15 @@ export function TopicsPage() {
                 </div>
                 <div className="card-grid">
                   {closed.map(t => (
-                    <TopicCard key={t.id} topic={t} onClick={() => navigate(`/topics/${t.id}`)} />
+                    <TopicCard
+                      key={t.id}
+                      topic={t}
+                      onClick={() => navigate(`/topics/${t.id}`)}
+                      onDelete={() => handleDelete(t)}
+                      deleting={!!deleting[t.id]}
+                      onReopen={() => handleReopen(t)}
+                      reopening={!!reopening[t.id]}
+                    />
                   ))}
                 </div>
               </section>
@@ -101,12 +146,74 @@ function LifecycleBadge({ lifecycle }: { lifecycle: string }) {
   return <span className={`badge ${cls}`}>{label}</span>
 }
 
-function TopicCard({ topic, onClick }: { topic: TopicOut; onClick: () => void }) {
+function TopicCard({
+  topic,
+  onClick,
+  onDelete,
+  deleting = false,
+  onReopen,
+  reopening = false,
+}: {
+  topic: TopicOut
+  onClick: () => void
+  onDelete: () => void
+  deleting?: boolean
+  onReopen?: () => void
+  reopening?: boolean
+}) {
+  const stop = (e: MouseEvent) => e.stopPropagation()
+
   return (
     <div className="topic-card" onClick={onClick}>
       <div className="topic-card-header">
         <div className="topic-title">{topic.title}</div>
-        <LifecycleBadge lifecycle={topic.lifecycle} />
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <LifecycleBadge lifecycle={topic.lifecycle} />
+          {topic.lifecycle === 'closed' && onReopen && (
+            <button
+              className="btn btn-ghost btn-icon"
+              onClick={(e) => {
+                stop(e)
+                onReopen()
+              }}
+              disabled={reopening || deleting}
+              aria-label="重开话题"
+              title="重开话题"
+            >
+              {reopening ? (
+                <Spinner size={14} />
+              ) : (
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M3 12a9 9 0 1 0 3-6.7" />
+                  <path d="M3 4v5h5" />
+                </svg>
+              )}
+            </button>
+          )}
+          <button
+            className="btn btn-ghost btn-icon"
+            onClick={(e) => {
+              stop(e)
+              onDelete()
+            }}
+            disabled={deleting || reopening}
+            aria-label="删除话题"
+            title="删除话题"
+            style={{ color: '#dc2626' }}
+          >
+            {deleting ? (
+              <Spinner size={14} />
+            ) : (
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M3 6h18" />
+                <path d="M8 6V4.8C8 3.8 8.8 3 9.8 3h4.4C15.2 3 16 3.8 16 4.8V6" />
+                <path d="M18 6l-1 13a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2L6 6" />
+                <path d="M10 11v6" />
+                <path d="M14 11v6" />
+              </svg>
+            )}
+          </button>
+        </div>
       </div>
       <div className="topic-desc">{topic.description}</div>
       {topic.tags.length > 0 && (

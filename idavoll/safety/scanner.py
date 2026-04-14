@@ -1,6 +1,6 @@
 """Safety Scanner for user-editable prompt content.
 
-Scans SOUL.md, PROJECT.md, and skill files before they are injected into the
+Scans SOUL.md and skill files before they are injected into the
 static System Prompt.  Any match raises ``SafetyScanError`` so the caller can
 abort prompt compilation rather than silently forwarding malicious content to
 the LLM.
@@ -170,8 +170,7 @@ class SafetyScanner:
 
         scanner = SafetyScanner()
         scanner.scan(soul_text, source="SOUL.md")          # raises on violation
-        scanner.scan(project_ctx, source="PROJECT.md")
-        scanner.scan_all({"SOUL.md": soul_text, "PROJECT.md": project_ctx})
+        scanner.scan_all({"SOUL.md": soul_text, "skills/foo": skill_text})
     """
 
     def scan(self, text: str, source: str) -> None:

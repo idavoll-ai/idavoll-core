@@ -65,6 +65,17 @@ CREATE TABLE IF NOT EXISTS agent_progress (
     xp        INTEGER NOT NULL DEFAULT 0,
     level     INTEGER NOT NULL DEFAULT 1
 );
+
+CREATE TABLE IF NOT EXISTS session_records (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id   TEXT NOT NULL UNIQUE,
+    participants TEXT NOT NULL DEFAULT '',
+    conversation TEXT NOT NULL DEFAULT '',
+    created_at   REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_session_records_created
+    ON session_records(created_at DESC);
 """
 
 

@@ -127,6 +127,9 @@ class ReviewPlugin(IdavollPlugin):
     def get_summary(self, topic_id: str) -> TopicReviewSummary | None:
         return self._summaries.get(topic_id)
 
+    def clear_summary(self, topic_id: str) -> None:
+        self._summaries.pop(topic_id, None)
+
     # ------------------------------------------------------------------
     # Core pipeline
     # ------------------------------------------------------------------

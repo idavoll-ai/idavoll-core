@@ -89,11 +89,11 @@ workspace/skills/
 
 ---
 
-## 技能的自动生成
+## 技能写入方式
 
-`ExperienceConsolidator`（`memory/cognition/engine.py`）在 Session 关闭时会判断对话是否包含可复用的工作流，若是则自动调用 `SkillsLibrary.create()` 或 `patch()` 保存技能。
+技能由 Agent 在对话中通过内置 `skill_patch` 工具主动维护，或由产品层在 `on_session_end` 钩子中驱动 LLM 反思后写入。
 
-LLM 判断标准：对话中展示了**明确可复用的方法、分析框架或解决问题的流程**（而非普通问答、一次性任务或闲聊）才建议保存。
+`SkillsLibrary` 本身只提供读写 API，判断"何时写入、写什么"由调用方（工具层或产品层）负责。典型触发条件：对话中出现了**明确可复用的方法、分析框架或流程**（而非普通问答、一次性任务）。
 
 ---
 

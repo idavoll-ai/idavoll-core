@@ -67,6 +67,9 @@ pre_tool_call / post_tool_call	未实现（无工具执行环）
 - [ ] Review Timing -- 现有评审触发时机是 Topic Close， 应该 多 Timing 设计
 - [ ] 现在出现一个问题，比如说A和B一起对话的时候，A的相关回答内容会污染B的回答，such as：
   ![A-B对话](./assets/image.png)
+- [ ] 评审机制可以好好设计一下 - 可以做一个 multi-agent
+- [ ]  llm 需要能够有自主抉择 将高质量对话 做摘要 存在 MEMORY.md 的反思能力
+
 
 ---
 
@@ -83,6 +86,7 @@ pre_tool_call / post_tool_call	未实现（无工具执行环）
 ## 建议阅读顺序
 
 - [ ] [docs/mvp_design.md](./docs/mvp_design.md)
+- [ ] [docs/growth_experience_guide.md](./docs/growth_experience_guide.md)
 - [ ] [idavoll/app.py](./idavoll/app.py)
 - [ ] [vingolf/app.py](./vingolf/app.py)
 - [ ] [vingolf/plugins/topic.py](./vingolf/plugins/topic.py)

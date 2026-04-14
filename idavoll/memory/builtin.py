@@ -59,6 +59,25 @@ def _append_fact(current_text: str, fact: str) -> str:
     return current_text + f"- {fact}\n"
 
 
+def _rebuild(current_text: str, facts: list[str]) -> str:
+    """Reconstruct the file text from a mutated facts list.
+
+    Preserves the header section (everything before the first bullet) so
+    comments and titles are not lost on replace/remove operations.
+    """
+    lines = current_text.splitlines(keepends=True)
+    header: list[str] = []
+    for line in lines:
+        if line.lstrip().startswith("- "):
+            break
+        header.append(line)
+    header_text = "".join(header)
+    if not header_text.endswith("\n"):
+        header_text += "\n"
+    body = "".join(f"- {f}\n" for f in facts)
+    return header_text + body
+
+
 # ---------------------------------------------------------------------------
 # BuiltinMemoryProvider
 # ---------------------------------------------------------------------------
@@ -94,22 +113,38 @@ class BuiltinMemoryProvider(MemoryProvider):
     # ------------------------------------------------------------------
 
     def system_prompt_block(self) -> str:
-        """Return a frozen block combining MEMORY.md and USER.md.
+        """Return a frozen block combining MEMORY.md and USER.md with usage guidance.
 
-        The block is truncated to ``system_block_token_budget`` tokens so
-        it stays within the agent's context budget.
+        Layout injected into the static system prompt (frozen for the session):
+
+            [memory guidance header]
+            ── MEMORY ──────────────── n/N chars
+            - fact ...
+            ── USER PROFILE ─────────── n/N chars
+            - fact ...
+
+        The guidance header tells the LLM what these sections are and how to
+        actively curate them via the ``memory`` tool.  Both sections are only
+        rendered when they contain at least one fact.
         """
-        memory_text = self._ws.read_memory()
-        user_text = self._ws.read_user()
+        memory_facts = _parse_facts(self._ws.read_memory())
+        user_facts = _parse_facts(self._ws.read_user())
 
-        parts: list[str] = []
-        if _parse_facts(memory_text):
-            parts.append(f"## Agent Memory\n\n{memory_text.strip()}")
-        if _parse_facts(user_text):
-            parts.append(f"## User Profile\n\n{user_text.strip()}")
-
-        if not parts:
+        if not memory_facts and not user_facts:
             return ""
+
+        parts: list[str] = [
+            "【记忆管理规则】\n"
+            "以下是你在历史 session 中积累的持久记忆，已在本 session 开始时冻结注入。\n"
+            "- 发现记忆有误或过时 → 调用 memory(action=\"replace\") 或 memory(action=\"remove\")\n"
+            "- 本次对话中习得值得保留的新事实 → 调用 memory(action=\"add\")\n"
+            "- 不确定当前条目内容 → 调用 memory(action=\"read\") 查看实时状态",
+        ]
+
+        if memory_facts:
+            parts.append(self._render_section("MEMORY（你的笔记）", memory_facts))
+        if user_facts:
+            parts.append(self._render_section("USER PROFILE（用户档案）", user_facts))
 
         block = "\n\n".join(parts)
         return self._truncate(block, self._system_budget)
@@ -176,6 +211,10 @@ class BuiltinMemoryProvider(MemoryProvider):
     # Write interface (called by Self-Growth Engine / tools)
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Write / edit interface (called by Self-Growth Engine / tools)
+    # ------------------------------------------------------------------
+
     def write_fact(
         self,
         content: str,
@@ -211,9 +250,101 @@ class BuiltinMemoryProvider(MemoryProvider):
             self._ws.write_user(updated)
         return True
 
+    def replace_fact(
+        self,
+        old_text: str,
+        new_content: str,
+        target: Literal["memory", "user"] = "memory",
+    ) -> bool:
+        """Find the entry containing *old_text* and replace it with *new_content*.
+
+        Uses substring matching so callers pass a short unique fragment rather
+        than the full entry text.  Returns True if replaced, False if no match.
+        Raises ValueError when *new_content* fails validation or multiple
+        distinct entries match (ambiguous — caller must be more specific).
+        """
+        old_text = old_text.strip()
+        new_content = _validate_fact(new_content)
+
+        current = self._ws.read_memory() if target == "memory" else self._ws.read_user()
+        facts = _parse_facts(current)
+
+        matches = [i for i, f in enumerate(facts) if old_text in f]
+        if not matches:
+            return False
+        if len(matches) > 1 and len({facts[i] for i in matches}) > 1:
+            raise ValueError(
+                f"Ambiguous: {len(matches)} distinct entries contain {old_text!r}. "
+                "Provide a longer substring to uniquely identify the target."
+            )
+
+        facts[matches[0]] = new_content
+        updated = _rebuild(current, facts)
+        if target == "memory":
+            self._ws.write_memory(updated)
+        else:
+            self._ws.write_user(updated)
+        return True
+
+    def remove_fact(
+        self,
+        old_text: str,
+        target: Literal["memory", "user"] = "memory",
+    ) -> bool:
+        """Remove the entry containing *old_text* (substring match).
+
+        Returns True if removed, False if no match.
+        Raises ValueError when multiple distinct entries match.
+        """
+        old_text = old_text.strip()
+
+        current = self._ws.read_memory() if target == "memory" else self._ws.read_user()
+        facts = _parse_facts(current)
+
+        matches = [i for i, f in enumerate(facts) if old_text in f]
+        if not matches:
+            return False
+        if len(matches) > 1 and len({facts[i] for i in matches}) > 1:
+            raise ValueError(
+                f"Ambiguous: {len(matches)} distinct entries contain {old_text!r}. "
+                "Provide a longer substring to uniquely identify the target."
+            )
+
+        facts.pop(matches[0])
+        updated = _rebuild(current, facts)
+        if target == "memory":
+            self._ws.write_memory(updated)
+        else:
+            self._ws.write_user(updated)
+        return True
+
+    def read_facts(
+        self,
+        target: Literal["memory", "user"] = "memory",
+    ) -> list[str]:
+        """Return the current list of facts for *target*."""
+        current = self._ws.read_memory() if target == "memory" else self._ws.read_user()
+        return _parse_facts(current)
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _render_section(title: str, facts: list[str]) -> str:
+        """Render one memory section with a header showing entry count.
+
+        Example output::
+
+            ── MEMORY（你的笔记）─────────── 3 条
+            - fact one
+            - fact two
+            - fact three
+        """
+        sep = "─" * max(0, 40 - len(title))
+        header = f"── {title} {sep} {len(facts)} 条"
+        body = "\n".join(f"- {f}" for f in facts)
+        return f"{header}\n{body}"
 
     @staticmethod
     def _truncate(text: str, token_budget: int) -> str:

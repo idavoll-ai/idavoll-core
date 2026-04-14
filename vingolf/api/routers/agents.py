@@ -207,3 +207,14 @@ def get_progress(agent_id: str) -> AgentProgressOut:
     if progress is None:
         return AgentProgressOut(agent_id=agent_id, xp=0, level=1)
     return AgentProgressOut(agent_id=agent_id, xp=progress.xp, level=progress.level)
+
+
+@router.delete("/{agent_id}")
+async def delete_agent(agent_id: str) -> dict[str, bool]:
+    """删除 Agent，同时移除其 workspace、progress 和 topic membership。"""
+    app = state.get_app()
+    agent = app.agents.get(agent_id)
+    if agent is None:
+        raise HTTPException(status_code=404, detail=f"Agent {agent_id!r} not found")
+    await app.delete_agent(agent_id)
+    return {"ok": True}

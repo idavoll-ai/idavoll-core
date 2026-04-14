@@ -86,51 +86,48 @@ class Session:
 
 ---
 
-## 跨 Session 检索（`search.py`）
+## 跨 Session 检索（`search.py` + `vingolf/persistence/session_repo.py`）
 
-`SessionSearch` 从历史 Session 摘要文件中检索与当前对话相关的过往经验，填补"我记得发生过这件事，但它还不够重要到写入 MEMORY.md"的空白。
+`agent.session_search` 接口统一为一个鸭子类型：只需实现 `async def search(query, context) -> str`。
 
-### 数据来源
+### Core 层：no-op 存根
 
-`ExperienceConsolidator` 在每次 Session 关闭后写入 `workspace/sessions/{session_id}.md`，格式：
+`idavoll/session/search.py` 的 `SessionSearch` 是一个空实现，当产品层未配置存储时使用，`search()` 始终返回空字符串。
 
-```markdown
-# Session Summary
+### Vingolf 层：`SQLiteSessionSearch`
 
-- **Session ID**: <uuid>
-- **Date**: <YYYY-MM-DD HH:MM UTC>
-- **Participants**: <逗号分隔名称>
-- **Facts written**: <n>
+`vingolf/persistence/session_repo.py` 提供完整实现，在 `VingolfApp.startup()` 时通过 `_attach_session_search()` 替换掉每个 Agent 上的 no-op 存根。
 
-## Key Points
+**数据来源：** `VingolfApp` 监听 `on_session_end` 和 `topic.closed` 事件，将原始对话写入 `session_records` 表（`SessionRecordRepository.save()`）。
 
-- ...
-```
+**搜索策略（无向量嵌入）：**
 
-### 搜索策略（MVP，无向量嵌入）
-
-1. 对 query + context 分词（支持中英文混合）
-2. 对每条 Session 记录按关键词重叠数打分
-3. 返回 top-N 记录，格式化为 `<session-context>` 块，受 `token_budget` 约束
-4. 无匹配时返回空字符串
+1. 过滤出该 Agent 参与过的 session 记录
+2. 对 query + context 分词，按关键词命中数打分
+3. 对 top-N 命中记录调用 LLM 生成摘要（LLM 失败时降级为文本摘录）
+4. 合并结果为 `<session-context>` 块，受 `token_budget` 约束
 
 ### 返回格式
 
 ```xml
 <session-context>
-[2025-03-01 09:30 UTC] Session a1b2c3d4
-Participants: Alice, Bob
+[Session a1b2c3d4]
 - 关键要点 1
 - 关键要点 2
+
+---
+
+[Session b5c6d7e8]
+- 关键要点 3
 </session-context>
 ```
 
-该块由 `IdavollApp.generate_response` 自动附加到 `memory_context`，不需要调用方显式处理。
+该块由 `IdavollApp.generate_response` 自动附加到 `memory_context`，调用方无需手动处理。
 
 ---
 
 ## 设计原则
 
-- **Session 是临时的**：Session 结束后，持久化价值通过 `ExperienceConsolidator` 提取到 MEMORY.md 和 sessions/ 目录
+- **Session 是临时的**：Session 结束后，持久化价值一部分提取到 MEMORY.md，另一部分以原始对话形式写入 SQLite `session_records`
 - **压缩保留边界**：head/tail 策略确保对话的起点和最近上下文始终可见
 - **跨 Session 召回与持久记忆正交**：SessionSearch 不替代 MEMORY.md，二者由不同路径写入，服务不同的召回场景

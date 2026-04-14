@@ -66,7 +66,7 @@ flowchart TB
         WS2[SOUL.md]
         WS3[MEMORY.md / USER.md]
         WS4[skills/]
-        WS5[sessions/]
+        WS5[SQLite session_records]
         WS6[project context]
     end
 
@@ -113,7 +113,7 @@ flowchart TB
 | `MEMORY.md` | Durable facts，记录偏好、纠正、长期事实 |
 | `USER.md` | 用户画像和长期偏好 |
 | `skills/` | Agent 自己维护的流程技能库 |
-| `sessions/` | 历史 session 摘要和检索索引 |
+| SQLite `session_records` | 历史 session 原始记录，按需检索与总结 |
 | `PROJECT.md` | 项目上下文或目录说明 |
 
 Profile Workspace 是人格隔离、记忆隔离和经验隔离的基础。
@@ -523,7 +523,7 @@ flowchart LR
     C[写 MEMORY.md / USER.md]
     D[外部语义推理 Provider]
     E[创建或修正 Skill]
-    F[写 Session Summary / Search Index]
+    F[写 SQLite Session Record]
     G[下次会话自动召回]
 
     A --> B --> C --> G
@@ -607,7 +607,7 @@ flowchart LR
   -> 如需则写入 MEMORY.md / USER.md
   -> 如需则更新外部语义 Provider
   -> 如需则创建或 patch Skill
-  -> 写 session summary / search index
+  -> 写 SQLite session_records 原始记录
 ```
 
 ## 9. Prompt 与记忆策略
@@ -730,7 +730,7 @@ flowchart TB
         Soul[SOUL.md]
         Mem[MEMORY.md / USER.md]
         Skills[skills/]
-        Sessions[sessions/]
+        Sessions[SQLite session_records]
         Proj[.hermes.md / HERMES.md]
     end
 

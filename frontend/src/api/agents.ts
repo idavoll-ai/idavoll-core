@@ -15,6 +15,7 @@ export const agentsApi = {
   list: () => api.get<AgentOut[]>('/agents'),
   get: (id: string) => api.get<AgentOut>(`/agents/${id}`),
   create: (body: CreateAgentRequest) => api.post<AgentOut>('/agents', body),
+  remove: (id: string) => api.delete<{ ok: boolean }>(`/agents/${id}`),
 
   getSoul: (id: string) => api.get<SoulPreviewOut>(`/agents/${id}/soul`),
   refineSoul: (id: string, body: RefineSoulRequest) =>

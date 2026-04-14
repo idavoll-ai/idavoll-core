@@ -44,13 +44,6 @@ _USER_TEMPLATE = """\
      Updated by the agent over time; frozen into system prompt at session start. -->
 """
 
-_PROJECT_TEMPLATE = """\
-# Project Context
-
-<!-- Describe the project this agent operates in.
-     Loaded once at session start and injected as a static block. -->
-"""
-
 
 # ---------------------------------------------------------------------------
 # ProfileWorkspace
@@ -66,9 +59,7 @@ class ProfileWorkspace:
           SOUL.md          = agent identity and voice
           MEMORY.md        = durable facts (frozen at session start)
           USER.md          = user profile (frozen at session start)
-          PROJECT.md       = optional project context
           skills/          = reusable workflow skills
-          sessions/        = historical session summaries and search index
 
     All public methods are *semantic* — callers deal in names and content
     strings, never in filesystem paths.  Path details stay private so the
@@ -78,9 +69,7 @@ class ProfileWorkspace:
     SOUL_FILE = "SOUL.md"
     MEMORY_FILE = "MEMORY.md"
     USER_FILE = "USER.md"
-    PROJECT_FILE = "PROJECT.md"
     SKILLS_DIR = "skills"
-    SESSIONS_DIR = "sessions"
 
     def __init__(self, root: Path) -> None:
         self._root = root
@@ -109,10 +98,6 @@ class ProfileWorkspace:
 
     def read_user(self) -> str:
         return self._read(self._root / self.USER_FILE)
-
-    def read_project_context(self) -> str:
-        """Return PROJECT.md content, or empty string if absent."""
-        return self._read(self._root / self.PROJECT_FILE)
 
     # ------------------------------------------------------------------
     # Core document writes
@@ -151,28 +136,6 @@ class ProfileWorkspace:
     def write_skill_doc(self, name: str, text: str) -> None:
         """Write raw SKILL.md content for *name*.  Creates directories as needed."""
         self._write(self._root / self.SKILLS_DIR / name / "SKILL.md", text)
-
-    # ------------------------------------------------------------------
-    # Sessions — semantic interface (no Path exposed)
-    # ------------------------------------------------------------------
-
-    def list_session_ids(self) -> list[str]:
-        """Return all session IDs (file stems), sorted newest-first."""
-        sessions_dir = self._root / self.SESSIONS_DIR
-        if not sessions_dir.exists():
-            return []
-        return sorted(
-            (p.stem for p in sessions_dir.glob("*.md")),
-            reverse=True,
-        )
-
-    def read_session_summary(self, session_id: str) -> str:
-        """Return raw session summary content for *session_id*, or '' if absent."""
-        return self._read(self._root / self.SESSIONS_DIR / f"{session_id}.md")
-
-    def write_session_summary(self, session_id: str, text: str) -> None:
-        """Write session summary content.  Creates sessions/ directory if needed."""
-        self._write(self._root / self.SESSIONS_DIR / f"{session_id}.md", text)
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -233,7 +196,6 @@ class ProfileWorkspaceManager:
             )
         ws_dir.mkdir(parents=True, exist_ok=False)
         (ws_dir / ProfileWorkspace.SKILLS_DIR).mkdir()
-        (ws_dir / ProfileWorkspace.SESSIONS_DIR).mkdir()
 
         ws = ProfileWorkspace(ws_dir)
         ws.write_soul(self.render_soul(profile, soul))

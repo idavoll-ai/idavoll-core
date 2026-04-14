@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Literal
 from pydantic import BaseModel, Field
 
 from idavoll.plugin.base import IdavollPlugin
+from idavoll.session.session import SessionState
 from idavoll.session.session import Message
 from vingolf.config import TopicConfig
 
@@ -103,7 +104,7 @@ class TopicPlugin(IdavollPlugin):
         Sessions are purely in-memory and lost on restart.  For each open
         topic we recreate a Session, add its member agents as participants,
         and replay the persisted Posts as Messages so the conversation
-        history is available to the LLM context and ExperienceConsolidator.
+        history is available to the LLM context.
         """
         if self.repo is None:
             return
@@ -252,6 +253,82 @@ class TopicPlugin(IdavollPlugin):
             session=session,
         )
         return topic
+
+    async def reopen_topic(self, topic_id: str) -> Topic:
+        topic = self._get_topic_or_raise(topic_id)
+        if topic.lifecycle != TopicLifecycle.CLOSED:
+            return topic
+
+        topic.lifecycle = TopicLifecycle.OPEN
+        topic.closed_at = None
+
+        app = self._require_app()
+        session = app.sessions.get(topic.session_id)
+        if session is None:
+            agents = [
+                a
+                for aid in topic.memberships
+                if (a := app.agents.get(aid)) is not None
+            ]
+            session = app.sessions.create(
+                participants=agents,
+                metadata={},
+                max_context_messages=self._config.max_context_messages,
+            )
+            for post in sorted(self._posts.get(topic.id, []), key=lambda p: p.created_at):
+                session.add_message(
+                    Message(
+                        id=post.id,
+                        agent_id=post.author_id,
+                        agent_name=post.author_name,
+                        content=post.content,
+                        role="assistant" if post.source == "agent" else "user",
+                        created_at=post.created_at,
+                        metadata={
+                            "topic_id": topic.id,
+                            "post_id": post.id,
+                            "reply_to": post.reply_to,
+                        },
+                    )
+                )
+            topic.session_id = session.id
+        else:
+            session.state = SessionState.OPEN
+
+        if self.repo is not None:
+            await self.repo.save_topic(topic)
+        return topic
+
+    async def delete_topic(self, topic_id: str) -> None:
+        topic = self._get_topic_or_raise(topic_id)
+        app = self._require_app()
+
+        self._topics.pop(topic_id, None)
+        self._posts.pop(topic_id, None)
+        app.sessions.delete(topic.session_id)
+
+        if self.repo is not None:
+            await self.repo.delete_topic(topic_id)
+
+    async def remove_agent_from_topics(self, agent_id: str) -> int:
+        """Remove one agent from all topic memberships. Historical posts stay."""
+        app = self._require_app()
+        removed = 0
+        for topic in self._topics.values():
+            if agent_id not in topic.memberships:
+                continue
+            topic.memberships.pop(agent_id, None)
+            removed += 1
+            session = app.sessions.get(topic.session_id)
+            if session is not None:
+                session.participants = [
+                    participant for participant in session.participants
+                    if getattr(participant, "id", None) != agent_id
+                ]
+            if self.repo is not None:
+                await self.repo.delete_membership(topic.id, agent_id)
+                await self.repo.save_topic(topic)
+        return removed
 
     def build_scene_context(self, topic_id: str, *, max_posts: int | None = None) -> str:
         topic = self._get_topic_or_raise(topic_id)

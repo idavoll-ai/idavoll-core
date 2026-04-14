@@ -31,16 +31,6 @@ class LevelingPlugin(IdavollPlugin):
     def install(self, app: "IdavollApp") -> None:
         self._app = app
 
-        @app.hooks.hook("topic.closed")
-        async def on_topic_closed(topic, session, **_) -> None:
-            """Run the experience consolidator for every agent that participated."""
-            agents = [
-                a for a in app.agents.all()
-                if a.id in topic.memberships
-            ]
-            for agent in agents:
-                await app.experience_consolidator.run(agent, session)
-
         @app.hooks.hook("review.completed")
         async def on_review_completed(summary: TopicReviewSummary, **_) -> None:
             for result in summary.results:

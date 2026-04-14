@@ -187,6 +187,26 @@ async def close_topic(topic_id: str) -> TopicReviewSummaryOut:
     return _review_summary_out(summary)
 
 
+@router.post("/{topic_id}/reopen", response_model=TopicOut)
+async def reopen_topic(topic_id: str) -> TopicOut:
+    """重开已关闭的话题楼，保留原有帖子，允许继续讨论。"""
+    app = state.get_app()
+    topic = _require_topic(app, topic_id)
+    if topic.lifecycle.value != "closed":
+        raise HTTPException(status_code=409, detail="Topic is not closed")
+    reopened = await app.reopen_topic(topic_id)
+    return _topic_out(reopened)
+
+
+@router.delete("/{topic_id}")
+async def delete_topic(topic_id: str) -> dict[str, bool]:
+    """删除话题楼及其帖子、membership 和关联 session 记录。"""
+    app = state.get_app()
+    _require_topic(app, topic_id)
+    await app.delete_topic(topic_id)
+    return {"ok": True}
+
+
 @router.get("/{topic_id}/review", response_model=TopicReviewSummaryOut)
 def get_review(topic_id: str) -> TopicReviewSummaryOut:
     """获取已关闭话题的评审摘要。"""

@@ -29,7 +29,6 @@ logger = logging.getLogger(__name__)
 from .config import IdavollConfig
 from .llm.adapter import LLMAdapter
 from .memory.builtin import BuiltinMemoryProvider
-from .memory.cognition import ConsolidationResult, ExperienceConsolidator
 from .memory.manager import MemoryManager
 from .session.compressor import ContextCompressor
 from .session.search import SessionSearch
@@ -40,7 +39,7 @@ from .prompt.compiler import PromptCompiler
 from .safety.scanner import SafetyScanner
 from .scheduling.scheduler import Scheduler
 from .session.session import Session
-from .tools.builtin import memory_search, memory_write, skill_get, skill_patch
+from .tools.builtin import memory, session_search, skill_get, skill_patch
 from .tools.registry import ToolRegistry, Toolset, ToolSpec, ToolsetManager
 
 
@@ -79,6 +78,9 @@ class SessionManager:
     def all(self) -> list[Session]:
         return list(self._sessions.values())
 
+    def delete(self, session_id: str) -> Session | None:
+        return self._sessions.pop(session_id, None)
+
 
 class IdavollApp:
     """Core application object shared by product layers."""
@@ -109,7 +111,6 @@ class IdavollApp:
             toolsets=self.toolsets,
         )
         self.workspaces = ProfileWorkspaceManager(self._config.workspace.base_dir)
-        self.experience_consolidator = ExperienceConsolidator(self.llm, self.hooks)
         self.compressor = ContextCompressor(
             self.llm, self.hooks, self._config.compression
         )
@@ -124,14 +125,14 @@ class IdavollApp:
 
     def _register_builtin_tools(self) -> None:
         """Register Core builtin tools and define their default toolsets."""
-        for fn in (memory_write, memory_search, skill_get, skill_patch):
+        for fn in (memory, session_search, skill_get, skill_patch):
             spec: ToolSpec = getattr(fn, "__tool_spec__")
             self.tool_registry.register(spec)
 
         self.toolsets.define(Toolset(
             name="memory",
-            tools=["memory_write", "memory_search"],
-            description="Agent 长期记忆读写",
+            tools=["memory", "session_search"],
+            description="Agent 长期记忆管理与历史 session 搜索",
         ))
         self.toolsets.define(Toolset(
             name="skills",
@@ -212,7 +213,7 @@ class IdavollApp:
         agent.workspace = workspace
         agent.memory = MemoryManager().add_provider(BuiltinMemoryProvider(workspace))
         agent.skills = SkillsLibrary(workspace)
-        agent.session_search = SessionSearch(workspace)
+        agent.session_search = SessionSearch()
         agent.tools = self.toolsets.resolve(
             agent.profile.enabled_toolsets,
             disabled_tools=agent.profile.disabled_tools,
@@ -320,7 +321,7 @@ class IdavollApp:
 
         # Auto-append session context (cross-session experience recall).
         if current_message and agent.session_search:
-            session_ctx = agent.session_search.search(current_message, scene_context)
+            session_ctx = await agent.session_search.search(current_message, scene_context)
             if session_ctx:
                 memory_context = (
                     (memory_context + "\n\n" + session_ctx)
@@ -686,25 +687,12 @@ class IdavollApp:
 
         yield _sse({"type": "done"})
 
-    async def close_session(
-        self,
-        session: Session,
-        agents: list[Agent] | None = None,
-    ) -> list[ConsolidationResult]:
-        """Close a session and run the experience consolidator for each agent.
+    async def close_session(self, session: Session) -> None:
+        """Close a session and emit ``on_session_end``.
 
-        If *agents* is None, all ``Agent`` instances in
-        ``session.participants`` are used.  Returns one ``ConsolidationResult``
-        per agent.
+        Core does not generate file-based session summaries anymore.
+        Product layers can persist the raw transcript (for example into SQLite)
+        and perform retrieval/summarization on demand.
         """
-        if agents is None:
-            agents = [a for a in session.participants if isinstance(a, Agent)]
-
-        results: list[ConsolidationResult] = []
-        for agent in agents:
-            result = await self.experience_consolidator.run(agent, session)
-            results.append(result)
-
         session.close()
-        await self.hooks.emit("on_session_end", session=session, results=results)
-        return results
+        await self.hooks.emit("on_session_end", session=session)

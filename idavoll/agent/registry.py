@@ -70,6 +70,10 @@ class AgentRegistry:
     def all(self) -> list[Agent]:
         return list(self._agents.values())
 
+    def delete(self, agent_id: str) -> Agent | None:
+        """Remove an agent from the in-memory registry."""
+        return self._agents.pop(agent_id, None)
+
     def update(self, agent_id: str, updater: Callable[[Agent], None]) -> Agent:
         agent = self.get_or_raise(agent_id)
         updater(agent)
