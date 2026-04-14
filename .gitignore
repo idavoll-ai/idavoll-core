@@ -20,7 +20,7 @@ htmlcov/
 .env
 .env.*
 !.env.example
-config.yaml
+/config.yaml
 !config.example.yaml
 
 # Editor / OS files
