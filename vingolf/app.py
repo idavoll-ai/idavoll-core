@@ -5,8 +5,8 @@ from typing import TYPE_CHECKING
 
 from idavoll.app import IdavollApp
 from idavoll.config import IdavollConfig
-from idavoll.plugin.base import IdavollPlugin
-from idavoll.plugin.hooks import HookBus
+from idavoll.hook.base import IdavollPlugin
+from idavoll.hook.hooks import HookBus
 
 from .config import VingolfConfig
 from .persistence import (

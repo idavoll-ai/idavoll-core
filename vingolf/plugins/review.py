@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Literal
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
-from idavoll.plugin.base import IdavollPlugin
+from idavoll.hook.base import IdavollPlugin
 from vingolf.config import ReviewConfig, ReviewPlanConfig
 from .review_team import GrowthDirective, ReviewerOutput
 from .topic import Post, Topic

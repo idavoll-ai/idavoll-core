@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, Field
 
-from idavoll.plugin.base import IdavollPlugin
+from idavoll.hook.base import IdavollPlugin
 from idavoll.session.session import SessionState
 from idavoll.session.session import Message
 from vingolf.config import TopicConfig

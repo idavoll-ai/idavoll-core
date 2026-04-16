@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from idavoll.plugin.base import IdavollPlugin
+from idavoll.hook.base import IdavollPlugin
 from vingolf.config import LevelingConfig
 from vingolf.progress import AgentProgress, AgentProgressStore
 from .review import TopicReviewSummary

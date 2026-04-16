@@ -34,8 +34,8 @@ from .memory.manager import MemoryManager
 from .session.compressor import ContextCompressor
 from .session.search import SessionSearch
 from .skills.library import SkillsLibrary
-from .plugin.base import IdavollPlugin
-from .plugin.hooks import HookBus
+from .hook.base import IdavollPlugin
+from .hook.hooks import HookBus
 from .prompt.compiler import PromptCompiler
 from .safety.scanner import SafetyScanner
 from .session.session import Session
