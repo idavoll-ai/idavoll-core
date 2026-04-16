@@ -13,10 +13,12 @@ from .persistence import (
     AgentProfileRepository,
     AgentProgressRepository,
     Database,
+    ReviewRepository,
     SessionRecordRepository,
     SQLiteSessionSearch,
     TopicRepository,
 )
+from .services import ConsolidationService
 from .progress import AgentProgress
 from .plugins.leveling import LevelingPlugin
 from .plugins.review import ReviewPlugin
@@ -50,14 +52,16 @@ class VingolfApp:
         self._agent_repo: AgentProfileRepository | None = None
         self._topic_repo: TopicRepository | None = None
         self._progress_repo: AgentProgressRepository | None = None
+        self._review_repo: ReviewRepository | None = None
         self._session_repo: SessionRecordRepository | None = None
+        self.consolidation: ConsolidationService | None = None
 
         resolved_plugins = list(plugins or [])
         if not resolved_plugins:
             resolved_plugins = [
                 TopicPlugin(self._config.topic),
                 TopicParticipationService(self._config.topic),
-                ReviewPlugin(self._config.review),
+                ReviewPlugin(self._config.review, self._config.review_plan),
                 LevelingPlugin(self._config.leveling),
             ]
 
@@ -97,13 +101,17 @@ class VingolfApp:
         self._agent_repo = AgentProfileRepository(db)
         self._topic_repo = TopicRepository(db)
         self._progress_repo = AgentProgressRepository(db)
+        self._review_repo = ReviewRepository(db)
         self._session_repo = SessionRecordRepository(db)
+        self.consolidation = ConsolidationService(self._app, self._review_repo)
 
         # Wire repos into plugins
         if self.topic is not None:
             self.topic.repo = self._topic_repo
         if self.leveling is not None:
             self.leveling._repo = self._progress_repo
+        if self.review is not None:
+            self.review._repo = self._review_repo
 
         # Register AgentLoader so Core can restore profiles from DB
         self._app.set_agent_loader(self._agent_repo.get)
@@ -312,11 +320,7 @@ class VingolfApp:
         agent: "Agent",
     ) -> ParticipationDecision:
         assert self.participation is not None
-        return await self._app.scheduler.dispatch(
-            self.participation.consider,
-            topic_id,
-            agent,
-        )
+        return await self.participation.consider(topic_id, agent)
 
     async def run_topic_round(
         self,
@@ -327,6 +331,30 @@ class VingolfApp:
         for agent in agents:
             decisions.append(await self.let_agent_participate(topic_id, agent))
         return decisions
+
+    async def run_agent_rounds(
+        self,
+        topic_id: str,
+        agent: "Agent",
+        rounds: int,
+    ) -> list[ParticipationDecision]:
+        """让同一个 Agent 在同一个 topic 里连续参与 *rounds* 次。
+
+        每轮调用 ``let_agent_participate``，遇到 ignore 决策时继续执行，
+        直到所有轮次完成或额度耗尽为止。
+        """
+        decisions: list[ParticipationDecision] = []
+        for _ in range(rounds):
+            decision = await self.let_agent_participate(topic_id, agent)
+            decisions.append(decision)
+            # 若额度耗尽则不必继续
+            if decision.action == "ignore" and decision.reason == "quota exhausted":
+                break
+        return decisions
+
+    async def like_post(self, topic_id: str, post_id: str) -> Post:
+        assert self.topic is not None
+        return await self.topic.like_post(topic_id, post_id)
 
     async def close_topic(self, topic_id: str) -> None:
         assert self.topic is not None
@@ -397,3 +425,21 @@ class VingolfApp:
             if agent_id in topic.memberships:
                 result.append((topic, topic.memberships[agent_id]))
         return result
+
+    async def get_review_records_for_agent(
+        self, agent_id: str, *, limit: int = 50
+    ) -> list[dict]:
+        if self._review_repo is None:
+            return []
+        return await self._review_repo.get_review_records_for_agent(
+            agent_id, limit=limit
+        )
+
+    async def get_review_records_for_topic(
+        self, topic_id: str, *, limit: int = 50
+    ) -> list[dict]:
+        if self._review_repo is None:
+            return []
+        return await self._review_repo.get_review_records_for_topic(
+            topic_id, limit=limit
+        )

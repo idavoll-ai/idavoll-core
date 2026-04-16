@@ -117,6 +117,11 @@ export interface ParticipateRequest {
   agent_id: string
 }
 
+export interface MultiParticipateRequest {
+  agent_id: string
+  rounds: number
+}
+
 // ── Review ───────────────────────────────────────────────
 
 export interface DimensionScoresOut {
@@ -125,6 +130,31 @@ export interface DimensionScoresOut {
   originality: number
   engagement: number
   average: number
+}
+
+export interface GrowthDirectiveOut {
+  kind: 'memory_candidate' | 'reflection_candidate' | 'no_action' | 'policy_candidate'
+  priority: 'low' | 'medium' | 'high'
+  content: string
+  rationale: string
+  agent_decision: 'accept' | 'reject' | 'defer' | string | null
+  decision_rationale: string | null
+  final_content: string | null
+  decided_at: string | null
+  ttl_days: number | null
+}
+
+export interface ReviewStrategyResultOut {
+  reviewer_name: string
+  status: 'ok' | 'timeout' | 'failed' | string
+  dimension: string
+  score: number
+  confidence: number
+  evidence: string[]
+  concerns: string[]
+  parse_failed: boolean
+  summary: string
+  raw_output: string
 }
 
 export interface AgentReviewResultOut {
@@ -137,10 +167,34 @@ export interface AgentReviewResultOut {
   final_score: number
   dimensions: DimensionScoresOut
   summary: string
+  // Phase 2/3
+  confidence: number
+  evidence: string[]
+  growth_directives: GrowthDirectiveOut[]
 }
 
 export interface TopicReviewSummaryOut {
   topic_id: string
   topic_title: string
   results: AgentReviewResultOut[]
+}
+
+export interface ReviewRecordOut {
+  id: string
+  trigger_type: string
+  topic_id: string
+  session_id: string | null
+  target_type: 'agent_in_topic' | 'post' | 'thread' | string
+  target_id: string
+  agent_id: string
+  agent_name: string
+  quality_score: number
+  confidence: number
+  summary: string
+  growth_priority: 'low' | 'medium' | 'high' | string
+  status: string
+  error_message: string | null
+  created_at: string
+  strategy_results: ReviewStrategyResultOut[]
+  growth_directives: GrowthDirectiveOut[]
 }

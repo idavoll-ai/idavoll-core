@@ -37,12 +37,7 @@ class LevelingPlugin(IdavollPlugin):
                 agent = app.agents.get(result.agent_id)
                 if agent is None:
                     continue
-                await self._apply(
-                    agent,
-                    result.final_score,
-                    review_summary=result.summary,
-                    topic_title=summary.topic_title,
-                )
+                await self._apply(agent, result.final_score)
 
     async def load_state(self) -> None:
         """Restore XP/Level from DB into the in-memory store."""
@@ -58,8 +53,6 @@ class LevelingPlugin(IdavollPlugin):
         self,
         agent: "Agent",
         final_score: float,
-        review_summary: str = "",
-        topic_title: str = "",
     ) -> None:
         assert self._app is not None
         if self._repo is not None:
@@ -78,18 +71,6 @@ class LevelingPlugin(IdavollPlugin):
 
         if self._repo is not None:
             await self._repo.save(progress)
-
-        # Write review feedback into MEMORY.md so the agent can learn from it.
-        if agent.memory and review_summary:
-            context = f"「{topic_title}」" if topic_title else "话题"
-            fact = (
-                f"在{context}的评审中获得 {final_score:.1f} 分"
-                f"（满分10）。评审点评：{review_summary}"
-            )
-            try:
-                agent.memory.write_fact(fact, target="memory")
-            except ValueError:
-                pass  # oversized or injection — skip silently
 
         if progress.level != old_level:
             await self._app.hooks.emit(

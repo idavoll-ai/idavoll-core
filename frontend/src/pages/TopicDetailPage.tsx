@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { topicsApi } from '@/api/topics'
-import type { PostOut, TopicOut, TopicReviewSummaryOut } from '@/api/types'
+import type { DecisionOut, PostOut, ReviewRecordOut, TopicOut, TopicReviewSummaryOut } from '@/api/types'
+import { ReviewRecordList } from '@/components/ReviewRecordList'
 import { LoadingCenter, Spinner } from '@/components/ui/Spinner'
 
 export function TopicDetailPage() {
@@ -11,38 +12,61 @@ export function TopicDetailPage() {
   const [topic, setTopic] = useState<TopicOut | null>(null)
   const [posts, setPosts] = useState<PostOut[]>([])
   const [review, setReview] = useState<TopicReviewSummaryOut | null>(null)
+  const [reviewRecords, setReviewRecords] = useState<ReviewRecordOut[]>([])
 
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [tab, setTab] = useState<'posts' | 'review'>('posts')
+  const [tab, setTab] = useState<'posts' | 'review' | 'history'>('posts')
   const [closingLoading, setClosingLoading] = useState(false)
   const [reopeningLoading, setReopeningLoading] = useState(false)
+  const [refreshing, setRefreshing] = useState(false)
+  const [roundLoading, setRoundLoading] = useState(false)
+  const [multiPanel, setMultiPanel] = useState(false)
+  const [multiAgentId, setMultiAgentId] = useState('')
+  const [multiRounds, setMultiRounds] = useState(3)
+  const [multiLoading, setMultiLoading] = useState(false)
+  const [liking, setLiking] = useState<Record<string, boolean>>({})
+  const [actionMessage, setActionMessage] = useState<string | null>(null)
 
   const bottomRef = useRef<HTMLDivElement>(null)
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (mode: 'full' | 'refresh' = 'full') => {
     if (!topicId) return
-    setLoading(true)
+    if (mode === 'full') {
+      setLoading(true)
+    } else {
+      setRefreshing(true)
+    }
     setError(null)
     try {
-      const [t, p] = await Promise.all([
+      const [t, p, records] = await Promise.all([
         topicsApi.get(topicId),
         topicsApi.listPosts(topicId),
+        topicsApi.getReviewRecords(topicId).catch(() => []),
       ])
       setTopic(t)
       setPosts(p)
+      setReviewRecords(records)
+      let nextReview: TopicReviewSummaryOut | null = null
       if (t.lifecycle === 'closed') {
-        try { setReview(await topicsApi.getReview(topicId)) } catch {}
-        setTab('review')
+        try {
+          nextReview = await topicsApi.getReview(topicId)
+        } catch {}
+        if (mode === 'full') setTab('review')
       }
+      setReview(nextReview)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to load topic')
     } finally {
-      setLoading(false)
+      if (mode === 'full') {
+        setLoading(false)
+      } else {
+        setRefreshing(false)
+      }
     }
   }, [topicId])
 
-  useEffect(() => { load() }, [load])
+  useEffect(() => { load('full') }, [load])
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -53,6 +77,7 @@ export function TopicDetailPage() {
   if (!topic || !topicId) return null
 
   const isClosed = topic.lifecycle === 'closed'
+  const hotReviewByPost = buildHotReviewMap(reviewRecords)
 
   const lifecycleLabel: Record<string, string> = {
     open: '进行中', active: '活跃中', closed: '已关闭',
@@ -67,8 +92,10 @@ export function TopicDetailPage() {
     try {
       const r = await topicsApi.close(topicId)
       setReview(r)
+      setReviewRecords(await topicsApi.getReviewRecords(topicId).catch(() => []))
       setTopic(prev => prev ? { ...prev, lifecycle: 'closed' } : prev)
       setTab('review')
+      setActionMessage('话题已关闭，正式评审结果已生成。')
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Close failed')
     } finally {
@@ -82,12 +109,78 @@ export function TopicDetailPage() {
       const reopened = await topicsApi.reopen(topicId)
       setTopic(reopened)
       setReview(null)
+      setReviewRecords(await topicsApi.getReviewRecords(topicId).catch(() => []))
       setTab('posts')
       setPosts(await topicsApi.listPosts(topicId))
+      setActionMessage('话题已重新开放，可以继续讨论。')
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Reopen failed')
     } finally {
       setReopeningLoading(false)
+    }
+  }
+
+  const handleRefresh = async () => {
+    await load('refresh')
+  }
+
+  const handleRunRound = async () => {
+    if (!topicId) return
+    setRoundLoading(true)
+    setError(null)
+    setActionMessage(null)
+    try {
+      const decisions = await topicsApi.runRound(topicId)
+      await load('refresh')
+      setActionMessage(buildRoundSummary(decisions))
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Run round failed')
+    } finally {
+      setRoundLoading(false)
+    }
+  }
+
+  const handleParticipateMulti = async () => {
+    if (!topicId || !multiAgentId.trim()) return
+    setMultiLoading(true)
+    setError(null)
+    setActionMessage(null)
+    try {
+      const decisions = await topicsApi.participateMulti(topicId, {
+        agent_id: multiAgentId.trim(),
+        rounds: multiRounds,
+      })
+      await load('refresh')
+      setMultiPanel(false)
+      setMultiAgentId('')
+      setMultiRounds(3)
+      setActionMessage(buildMultiRoundSummary(decisions))
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Multi-round participate failed')
+    } finally {
+      setMultiLoading(false)
+    }
+  }
+
+  const handleLike = async (postId: string) => {
+    if (!topicId || isClosed) return
+    setLiking(prev => ({ ...prev, [postId]: true }))
+    setError(null)
+    try {
+      const updated = await topicsApi.likePost(topicId, postId)
+      const nextRecords = await topicsApi.getReviewRecords(topicId).catch(() => reviewRecords)
+      setPosts(prev => prev.map(post => (post.id === postId ? updated : post)))
+      setReviewRecords(nextRecords)
+      const hotReview = findLatestHotReview(nextRecords, postId)
+      setActionMessage(
+        hotReview
+          ? `这条帖子已触发 Hot Interaction Review，质量分 ${hotReview.quality_score.toFixed(1)}。`
+          : '点赞已提交。达到阈值时，后端会自动触发 Hot Interaction Review。',
+      )
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Like failed')
+    } finally {
+      setLiking(prev => ({ ...prev, [postId]: false }))
     }
   }
 
@@ -115,7 +208,7 @@ export function TopicDetailPage() {
           )}
         </div>
 
-        <div style={{ display: 'flex', gap: 8 }}>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
           {!isClosed ? (
             <button
               className="btn btn-danger"
@@ -140,6 +233,51 @@ export function TopicDetailPage() {
 
       <div className="page-body">
         {error && <div className="error-banner" style={{ marginBottom: 16 }}>{error}</div>}
+        {actionMessage && <div className="info-banner" style={{ marginBottom: 16 }}>{actionMessage}</div>}
+
+        {multiPanel && !isClosed && (
+          <div className="card" style={{ marginBottom: 16, display: 'flex', flexDirection: 'column', gap: 12 }}>
+            <div style={{ fontWeight: 600, fontSize: 14 }}>多轮参与</div>
+            <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'flex-end' }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 4, flex: '1 1 220px' }}>
+                <label style={{ fontSize: 12, color: 'var(--muted-foreground)' }}>Agent ID</label>
+                <input
+                  className="form-input"
+                  placeholder="粘贴 Agent ID"
+                  value={multiAgentId}
+                  onChange={e => setMultiAgentId(e.target.value)}
+                />
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 4, width: 90 }}>
+                <label style={{ fontSize: 12, color: 'var(--muted-foreground)' }}>轮数（1–20）</label>
+                <input
+                  className="form-input"
+                  type="number"
+                  min={1}
+                  max={20}
+                  value={multiRounds}
+                  onChange={e => setMultiRounds(Math.max(1, Math.min(20, Number(e.target.value))))}
+                />
+              </div>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button
+                  className="btn btn-primary"
+                  onClick={handleParticipateMulti}
+                  disabled={multiLoading || !multiAgentId.trim()}
+                >
+                  {multiLoading ? <Spinner size={14} /> : null}
+                  执行
+                </button>
+                <button className="btn btn-ghost" onClick={() => setMultiPanel(false)} disabled={multiLoading}>
+                  取消
+                </button>
+              </div>
+            </div>
+            <div style={{ fontSize: 12, color: 'var(--muted-foreground)' }}>
+              指定 Agent 将在此话题中连续参与多轮，每轮独立决策。额度耗尽时提前停止。
+            </div>
+          </div>
+        )}
 
         <div className="tabs">
           <button className={`tab-btn ${tab === 'posts' ? 'active' : ''}`} onClick={() => setTab('posts')}>
@@ -150,6 +288,9 @@ export function TopicDetailPage() {
               评审结果
             </button>
           )}
+          <button className={`tab-btn ${tab === 'history' ? 'active' : ''}`} onClick={() => setTab('history')}>
+            评审记录 ({reviewRecords.length})
+          </button>
         </div>
 
         <div style={{ marginTop: 20 }}>
@@ -160,7 +301,11 @@ export function TopicDetailPage() {
                   posts={posts}
                   topicId={topicId}
                   isClosed={isClosed}
+                  liking={liking}
+                  hotReviewByPost={hotReviewByPost}
                   onPosted={async () => setPosts(await topicsApi.listPosts(topicId))}
+                  onLike={handleLike}
+                  onOpenHistory={() => setTab('history')}
                 />
                 <div ref={bottomRef} />
               </div>
@@ -171,6 +316,7 @@ export function TopicDetailPage() {
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13, color: 'var(--muted-foreground)' }}>
                     <div>👥 {topic.member_count} 个 Agent 参与</div>
                     <div>💬 {posts.length} 条帖子</div>
+                    <div>⚡ {!isClosed ? '可直接运行一轮 Agent 决策' : '话题已冻结为只读'}</div>
                     <div style={{ wordBreak: 'break-all', fontFamily: 'var(--font-mono)', fontSize: 12 }}>{topic.id}</div>
                   </div>
                 </div>
@@ -190,6 +336,14 @@ export function TopicDetailPage() {
 
           {tab === 'review' && review && (
             <ReviewPanel review={review} />
+          )}
+
+          {tab === 'history' && (
+            <ReviewRecordList
+              records={reviewRecords}
+              emptyTitle="还没有评审记录"
+              emptyDesc="帖子点赞触发 Hot Interaction Review 后，或关闭话题后，这里会出现完整的 review records。"
+            />
           )}
         </div>
       </div>
@@ -213,16 +367,22 @@ function buildTree(posts: PostOut[]): { roots: PostOut[]; children: Record<strin
   return { roots, children }
 }
 
-function PostsThread({ posts, topicId, isClosed, onPosted }: {
+function PostsThread({ posts, topicId, isClosed, liking, hotReviewByPost, onPosted, onLike, onOpenHistory }: {
   posts: PostOut[]
   topicId: string
   isClosed: boolean
+  liking: Record<string, boolean>
+  hotReviewByPost: Record<string, ReviewRecordOut>
   onPosted: () => void
+  onLike: (postId: string) => Promise<void>
+  onOpenHistory: () => void
 }) {
   const [content, setContent] = useState('')
   const [replyTo, setReplyTo] = useState<string | null>(null)
   const [sending, setSending] = useState(false)
   const [authorName, setAuthorName] = useState('User')
+  const composerRef = useRef<HTMLDivElement>(null)
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
 
   const postMap = Object.fromEntries(posts.map(p => [p.id, p]))
   const { roots, children } = buildTree(posts)
@@ -238,6 +398,14 @@ function PostsThread({ posts, topicId, isClosed, onPosted }: {
     } finally {
       setSending(false)
     }
+  }
+
+  const handleReply = (postId: string) => {
+    setReplyTo(postId)
+    requestAnimationFrame(() => {
+      composerRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      textareaRef.current?.focus()
+    })
   }
 
   return (
@@ -256,17 +424,33 @@ function PostsThread({ posts, topicId, isClosed, onPosted }: {
               post={p}
               children={children}
               depth={0}
-              onReply={(id) => setReplyTo(id)}
+              canReply={!isClosed}
+              isLiking={!!liking[p.id]}
+              hotReview={hotReviewByPost[p.id]}
+              onReply={handleReply}
+              onLike={onLike}
+              likingMap={liking}
+              hotReviewByPost={hotReviewByPost}
+              onOpenHistory={onOpenHistory}
             />
           ))}
         </div>
       )}
 
       {!isClosed && (
-        <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+        <div
+          ref={composerRef}
+          className={`card ${replyTo ? 'reply-composer-active' : ''}`}
+          style={{ display: 'flex', flexDirection: 'column', gap: 10 }}
+        >
           {replyTo && (
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px', background: 'var(--secondary)', borderRadius: 'var(--radius)', fontSize: 13 }}>
-              <span className="text-muted">回复: {postMap[replyTo]?.author_name ?? '...'}</span>
+              <span className="text-muted">
+                回复: {postMap[replyTo]?.author_name ?? '...'}
+                {postMap[replyTo]?.content
+                  ? ` · ${postMap[replyTo].content.slice(0, 40)}${postMap[replyTo].content.length > 40 ? '...' : ''}`
+                  : ''}
+              </span>
               <button className="btn btn-ghost btn-sm" onClick={() => setReplyTo(null)}>×</button>
             </div>
           )}
@@ -282,9 +466,10 @@ function PostsThread({ posts, topicId, isClosed, onPosted }: {
           </div>
           <div style={{ display: 'flex', gap: 8 }}>
             <textarea
+              ref={textareaRef}
               className="form-textarea"
               style={{ minHeight: 72, flex: 1 }}
-              placeholder="写下你的想法... (Ctrl+Enter 发送)"
+              placeholder={replyTo ? '写下你的回复... (Ctrl+Enter 发送)' : '写下你的想法... (Ctrl+Enter 发送)'}
               value={content}
               onChange={e => setContent(e.target.value)}
               onKeyDown={e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) handleSend() }}
@@ -305,11 +490,18 @@ function PostsThread({ posts, topicId, isClosed, onPosted }: {
   )
 }
 
-function PostTree({ post, children, depth, onReply }: {
+function PostTree({ post, children, depth, canReply, isLiking, hotReview, onReply, onLike, likingMap, hotReviewByPost, onOpenHistory }: {
   post: PostOut
   children: Record<string, PostOut[]>
   depth: number
+  canReply: boolean
+  isLiking: boolean
+  hotReview?: ReviewRecordOut
   onReply: (id: string) => void
+  onLike: (postId: string) => Promise<void>
+  likingMap: Record<string, boolean>
+  hotReviewByPost: Record<string, ReviewRecordOut>
+  onOpenHistory: () => void
 }) {
   const replies = children[post.id] ?? []
   const [collapsed, setCollapsed] = useState(false)
@@ -320,8 +512,13 @@ function PostTree({ post, children, depth, onReply }: {
         post={post}
         hasReplies={replies.length > 0}
         collapsed={collapsed}
+        canReply={canReply}
+        isLiking={isLiking}
+        hotReview={hotReview}
         onToggleCollapse={() => setCollapsed(v => !v)}
         onReply={() => onReply(post.id)}
+        onLike={() => onLike(post.id)}
+        onOpenHistory={onOpenHistory}
       />
       {!collapsed && replies.length > 0 && (
         <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 8 }}>
@@ -331,7 +528,14 @@ function PostTree({ post, children, depth, onReply }: {
               post={r}
               children={children}
               depth={depth + 1}
+              canReply={canReply}
+              isLiking={!!likingMap[r.id]}
+              hotReview={hotReviewByPost[r.id]}
               onReply={onReply}
+              onLike={onLike}
+              likingMap={likingMap}
+              hotReviewByPost={hotReviewByPost}
+              onOpenHistory={onOpenHistory}
             />
           ))}
         </div>
@@ -340,12 +544,17 @@ function PostTree({ post, children, depth, onReply }: {
   )
 }
 
-function PostItem({ post, hasReplies, collapsed, onToggleCollapse, onReply }: {
+function PostItem({ post, hasReplies, collapsed, canReply, isLiking, hotReview, onToggleCollapse, onReply, onLike, onOpenHistory }: {
   post: PostOut
   hasReplies: boolean
   collapsed: boolean
+  canReply: boolean
+  isLiking: boolean
+  hotReview?: ReviewRecordOut
   onToggleCollapse: () => void
   onReply: () => void
+  onLike: () => Promise<void>
+  onOpenHistory: () => void
 }) {
   const isAgent = post.source === 'agent'
   return (
@@ -358,13 +567,29 @@ function PostItem({ post, hasReplies, collapsed, onToggleCollapse, onReply }: {
           <div className="post-author-name">{post.author_name}</div>
         </div>
         <span className="post-source-badge">{isAgent ? 'Agent' : 'User'}</span>
+        {hotReview && (
+          <button className="hot-review-badge" onClick={onOpenHistory} title="查看这条帖子的 Hot Review 记录">
+            Hot Review
+            <strong>{hotReview.quality_score.toFixed(1)}</strong>
+          </button>
+        )}
       </div>
       <div className="post-content">{post.content}</div>
+      {hotReview && (
+        <div className="hot-review-summary">
+          {hotReview.summary}
+        </div>
+      )}
       <div className="post-footer">
-        <span className="post-likes">❤️ {post.likes}</span>
-        <button className="btn btn-ghost btn-sm" onClick={onReply} style={{ fontSize: 12 }}>
-          回复
+        <button className="btn btn-ghost btn-sm post-like-btn" onClick={onLike} disabled={isLiking} style={{ fontSize: 12 }}>
+          {isLiking ? <Spinner size={12} /> : '❤️'}
+          {post.likes}
         </button>
+        {canReply && (
+          <button className="btn btn-ghost btn-sm" onClick={onReply} style={{ fontSize: 12 }}>
+            回复
+          </button>
+        )}
         {hasReplies && (
           <button className="btn btn-ghost btn-sm" onClick={onToggleCollapse} style={{ fontSize: 12, color: 'var(--muted-foreground)' }}>
             {collapsed ? '▶ 展开回复' : '▼ 收起回复'}
@@ -379,12 +604,19 @@ function PostItem({ post, hasReplies, collapsed, onToggleCollapse, onReply }: {
 
 function ReviewPanel({ review }: { review: TopicReviewSummaryOut }) {
   const sorted = [...review.results].sort((a, b) => b.final_score - a.final_score)
+  const avgScore = sorted.reduce((sum, item) => sum + item.final_score, 0) / Math.max(sorted.length, 1)
+  const avgConfidence = sorted.reduce((sum, item) => sum + item.confidence, 0) / Math.max(sorted.length, 1)
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
       <div className="card" style={{ background: 'linear-gradient(135deg, color-mix(in srgb, var(--primary) 15%, var(--card)), var(--card))' }}>
         <div style={{ fontWeight: 700, fontSize: 20, marginBottom: 4 }}>{review.topic_title}</div>
         <div className="text-muted text-sm">{review.results.length} 位 Agent 参与了本次评审</div>
+        <div className="review-summary-grid" style={{ marginTop: 16 }}>
+          <SummaryMetric label="平均最终分" value={avgScore.toFixed(2)} />
+          <SummaryMetric label="平均置信度" value={`${Math.round(avgConfidence * 100)}%`} />
+          <SummaryMetric label="Directive 总数" value={String(sorted.reduce((sum, item) => sum + item.growth_directives.length, 0))} />
+        </div>
       </div>
 
       {sorted.map((r, rank) => (
@@ -413,6 +645,12 @@ function ReviewPanel({ review }: { review: TopicReviewSummaryOut }) {
             </div>
           </div>
 
+          <div className="review-meta-row">
+            <MetricPill label="Confidence" value={`${Math.round(r.confidence * 100)}%`} />
+            <MetricPill label="Evidence" value={String(r.evidence.length)} />
+            <MetricPill label="Directives" value={String(r.growth_directives.length)} />
+          </div>
+
           <div className="score-row">
             <ScoreItem label="综合分" value={r.composite_score} />
             <ScoreItem label="点赞分" value={r.likes_score} />
@@ -428,8 +666,58 @@ function ReviewPanel({ review }: { review: TopicReviewSummaryOut }) {
           <div style={{ marginTop: 12, padding: '10px 14px', background: 'var(--secondary)', borderRadius: 'var(--radius)', fontSize: 13, lineHeight: 1.6 }}>
             {r.summary}
           </div>
+
+          {r.evidence.length > 0 && (
+            <div className="review-section">
+              <div className="review-section-title">关键证据</div>
+              <ul className="review-list">
+                {r.evidence.map((item, index) => (
+                  <li key={`${r.agent_id}-evidence-${index}`}>{item}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {r.growth_directives.length > 0 && (
+            <div className="review-section">
+              <div className="review-section-title">Growth Directives</div>
+              <div className="directive-list">
+                {r.growth_directives.map((directive, index) => (
+                  <div key={`${r.agent_id}-directive-${index}`} className="directive-card">
+                    <div className="directive-card-header">
+                      <span className={`directive-kind ${directive.kind}`}>{directive.kind}</span>
+                      <span className={`priority-badge ${directive.priority}`}>{directive.priority}</span>
+                    </div>
+                    {directive.content && <div className="directive-content">{directive.content}</div>}
+                    <div className="directive-rationale">{directive.rationale}</div>
+                    {directive.ttl_days !== null && (
+                      <div className="directive-ttl">TTL {directive.ttl_days} 天</div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       ))}
+    </div>
+  )
+}
+
+function SummaryMetric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="summary-metric">
+      <div className="summary-metric-label">{label}</div>
+      <div className="summary-metric-value">{value}</div>
+    </div>
+  )
+}
+
+function MetricPill({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="metric-pill">
+      <span>{label}</span>
+      <strong>{value}</strong>
     </div>
   )
 }
@@ -452,5 +740,46 @@ function DimBar({ label, value }: { label: string; value: number }) {
       </div>
       <div className="dim-bar-num">{value.toFixed(1)}</div>
     </div>
+  )
+}
+
+function buildMultiRoundSummary(decisions: DecisionOut[]) {
+  if (decisions.length === 0) return '没有决策结果。'
+  const agentName = decisions[0].agent_id
+  const counts = decisions.reduce<Record<DecisionOut['action'], number>>(
+    (acc, item) => { acc[item.action] += 1; return acc },
+    { post: 0, reply: 0, ignore: 0 },
+  )
+  return `Agent ${agentName} 完成 ${decisions.length} 轮参与：${counts.post} 条新帖，${counts.reply} 条回复，${counts.ignore} 次忽略。`
+}
+
+function buildRoundSummary(decisions: DecisionOut[]) {
+  const counts = decisions.reduce<Record<DecisionOut['action'], number>>((acc, item) => {
+    acc[item.action] += 1
+    return acc
+  }, { post: 0, reply: 0, ignore: 0 })
+
+  return `本轮完成：${decisions.length} 位 Agent 参与，${counts.post} 条新帖，${counts.reply} 条回复，${counts.ignore} 次忽略。`
+}
+
+function buildHotReviewMap(records: ReviewRecordOut[]) {
+  const latestByPost: Record<string, ReviewRecordOut> = {}
+  for (const record of records) {
+    if (record.trigger_type !== 'hot_interaction' || record.target_type !== 'post') {
+      continue
+    }
+    if (!latestByPost[record.target_id]) {
+      latestByPost[record.target_id] = record
+    }
+  }
+  return latestByPost
+}
+
+function findLatestHotReview(records: ReviewRecordOut[], postId: string) {
+  return records.find(
+    (record) =>
+      record.trigger_type === 'hot_interaction' &&
+      record.target_type === 'post' &&
+      record.target_id === postId,
   )
 }

@@ -59,7 +59,7 @@ on_session_end	session.closed
 pre_tool_call / post_tool_call	未实现（无工具执行环）
 命名不一致会导致 Plugin 作者按设计文档写的 hook 名称注册不上去。
 - [ ] Memory slot 配额未实现 设计要求 AgentRegistry 追踪 memory slot 配额，并在 Leveling 时扩容。AgentProfile 只有 ContextBudget（context token 预算），没有 memory slot 配额的概念，BuiltinMemoryProvider 也没有配额检查机制。
-- [ ] ExperienceConsolidator 没有跨会话的模式识别（第三层反馈），只做单次 session 的事实提取, 这里的 ExperienceConsolidator 需要重点考虑一下
+- [x] ExperienceConsolidator 没有跨会话的模式识别（第三层反馈），只做单次 session 的事实提取, 这里的 ExperienceConsolidator 需要重点考虑一下
 > 我有个想法其实是： 因为很多操作都是业务操作，比如说XP，Level，而这些操作注定是不能落到Core 上进行具体实现的，但是由于我们是有长期记忆的能力，那么是不是可以用 User.md 来控制他的权限行为，同时因为我们搭建了 ToolSet，LLM 可以触发这些 ToolSet 调用 tool 对自身的配额，token 权限做相应的修改 - 同时这要考虑到 Memory 的结构设计怎么考虑
 > 第二个是基于上述的点，我考虑到的是 不可能是 自己调用工具修改自己的权限配额吧，这也太扯淡了，那么是不是可以有一个 Master Agent， 然后做 A2A？ 让 Master Agent 来统一对相关情况做统一调度，那么这个时候是不是可以设置一个 Agent 池，可能需要考虑到Agent一次调用时间过长，但是我们需要通联的Agent过多的情况下，这个实现形式不好解决
 > 第三个是 关于 XP/Level 的成长设计，等级越高的 Agent 有越多的Tool调用以及Skills 理解，同时还有知识库的搭建，这些 至少我们基础的 Core 得支持
@@ -69,6 +69,10 @@ pre_tool_call / post_tool_call	未实现（无工具执行环）
   ![A-B对话](./assets/image.png)
 - [ ] 评审机制可以好好设计一下 - 可以做一个 multi-agent
 - [ ]  llm 需要能够有自主抉择 将高质量对话 做摘要 存在 MEMORY.md 的反思能力
+- [ ]  use cronJob to run the consolidation agent 感觉挺不错 [灵感来源](https://docs.langchain.com/oss/python/deepagents/memory)
+- [ ]  Idavoll 是不是也应该加入 interrupts 的功能，那么人机交互就可以直接复用 interrupts
+- [ ]  review 的 multi-agent 回答 是不是可以放入 消息队列 然后做异步的可靠性， 现在主要是调用的时间实在是太长了。
+- [ ]  现在的 默认 n 个 role，选择 m 个 role 好像还没实现 (m <= n)
 
 
 ---
@@ -81,7 +85,6 @@ pre_tool_call / post_tool_call	未实现（无工具执行环）
 - [ ] External Memory Provider —— 接入 Honcho / Mem0 等语义记忆后端的标准 Provider 接口
 - [ ] 接入知识库 Rag 等等，但是最好先别做，过于臃肿了
 - [ ] 多 Agent 协作	⚠️ Vingolf 独有	换一个产品场景要重写， 是不是抽象程度不够，到后续迭代的话再考虑，比如说 Idavoll-v2 ....
-- [ ] 
 
 ## 建议阅读顺序
 

@@ -2,33 +2,40 @@ import { useState, useEffect, useCallback } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { agentsApi } from '@/api/agents'
 import { topicsApi } from '@/api/topics'
-import type { AgentOut, AgentTopicOut, DecisionOut, PostOut, SoulPreviewOut, TopicOut } from '@/api/types'
+import type { AgentOut, AgentTopicOut, DecisionOut, PostOut, ReviewRecordOut, SoulPreviewOut, TopicOut } from '@/api/types'
+import { ReviewRecordList } from '@/components/ReviewRecordList'
 import { Modal } from '@/components/ui/Modal'
 import { LoadingCenter, Spinner } from '@/components/ui/Spinner'
 
-type Tab = 'soul' | 'topics'
+type Tab = 'soul' | 'topics' | 'reviews'
 
 export function AgentDetailPage() {
   const { agentId } = useParams<{ agentId: string }>()
   const navigate = useNavigate()
   const [agent, setAgent] = useState<AgentOut | null>(null)
   const [soul, setSoul] = useState<SoulPreviewOut | null>(null)
+  const [reviews, setReviews] = useState<ReviewRecordOut[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [tab, setTab] = useState<Tab>('soul')
   const [showRefine, setShowRefine] = useState(false)
+  const [consolidating, setConsolidating] = useState(false)
+  const [consolidatingAll, setConsolidatingAll] = useState(false)
+  const [actionMessage, setActionMessage] = useState<string | null>(null)
 
   const load = useCallback(async () => {
     if (!agentId) return
     setLoading(true)
     setError(null)
     try {
-      const [a, s] = await Promise.all([
+      const [a, s, records] = await Promise.all([
         agentsApi.get(agentId),
         agentsApi.getSoul(agentId),
+        agentsApi.getReviews(agentId).catch(() => []),
       ])
       setAgent(a)
       setSoul(s)
+      setReviews(records)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to load agent')
     } finally {
@@ -45,6 +52,49 @@ export function AgentDetailPage() {
   const maxXp = agent.level * 100
   const xpInLevel = agent.xp % maxXp
   const pct = Math.min(100, (xpInLevel / maxXp) * 100)
+
+  const handleConsolidate = async () => {
+    setConsolidating(true)
+    setError(null)
+    setActionMessage(null)
+    try {
+      const result = await agentsApi.consolidate(agentId)
+      setActionMessage(
+        result.applied > 0
+          ? `已为 ${agent.name} 应用 ${result.applied} 条 Growth Directives。`
+          : `${agent.name} 当前没有 pending directives。`,
+      )
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Consolidate failed')
+    } finally {
+      setConsolidating(false)
+    }
+  }
+
+  const handleConsolidateAll = async () => {
+    setConsolidatingAll(true)
+    setError(null)
+    setActionMessage(null)
+    try {
+      const result = await agentsApi.consolidateAll()
+      const entries = Object.entries(result)
+      const total = entries.reduce((sum, [, count]) => sum + count, 0)
+      if (total === 0) {
+        setActionMessage('当前所有 Agent 都没有 pending directives。')
+      } else {
+        const topLine = entries
+          .sort((a, b) => b[1] - a[1])
+          .slice(0, 3)
+          .map(([id, count]) => `${id.slice(0, 6)}… × ${count}`)
+          .join('，')
+        setActionMessage(`全量 consolidation 完成，共应用 ${total} 条。${topLine}`)
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Consolidate all failed')
+    } finally {
+      setConsolidatingAll(false)
+    }
+  }
 
   return (
     <>
@@ -67,18 +117,34 @@ export function AgentDetailPage() {
             {agent.name}
           </h1>
         </div>
-        <button className="btn btn-secondary" onClick={() => setShowRefine(true)}>
-          ✏️ 完善 SOUL
-        </button>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+          <button className="btn btn-ghost" onClick={handleConsolidateAll} disabled={consolidatingAll || consolidating}>
+            {consolidatingAll ? <Spinner size={14} /> : null}
+            Consolidate All
+          </button>
+          <button className="btn btn-secondary" onClick={handleConsolidate} disabled={consolidating || consolidatingAll}>
+            {consolidating ? <Spinner size={14} /> : null}
+            Consolidate
+          </button>
+          <button className="btn btn-secondary" onClick={() => setShowRefine(true)}>
+            ✏️ 完善 SOUL
+          </button>
+        </div>
       </div>
 
       <div className="page-body">
+        {error && <div className="error-banner" style={{ marginBottom: 16 }}>{error}</div>}
+        {actionMessage && <div className="info-banner" style={{ marginBottom: 16 }}>{actionMessage}</div>}
+
         <div className="tabs" style={{ marginBottom: 24 }}>
           <button className={`tab-btn ${tab === 'soul' ? 'active' : ''}`} onClick={() => setTab('soul')}>
             SOUL.md
           </button>
           <button className={`tab-btn ${tab === 'topics' ? 'active' : ''}`} onClick={() => setTab('topics')}>
             话题参与
+          </button>
+          <button className={`tab-btn ${tab === 'reviews' ? 'active' : ''}`} onClick={() => setTab('reviews')}>
+            评审历史 ({reviews.length})
           </button>
         </div>
 
@@ -118,12 +184,38 @@ export function AgentDetailPage() {
                   <InfoRow label="总 XP" value={agent.xp.toString()} />
                 </div>
               </div>
+
+              <div className="card">
+                <div style={{ fontWeight: 600, marginBottom: 12 }}>Growth Routing</div>
+                <div style={{ fontSize: 13, color: 'var(--muted-foreground)', lineHeight: 1.7, marginBottom: 14 }}>
+                  Consolidation 会把 review 生成的 pending directives 提升进长期记忆或反思链路。
+                </div>
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                  <button className="btn btn-primary btn-sm" onClick={handleConsolidate} disabled={consolidating || consolidatingAll}>
+                    {consolidating ? <Spinner size={14} /> : null}
+                    应用到当前 Agent
+                  </button>
+                  <button className="btn btn-secondary btn-sm" onClick={handleConsolidateAll} disabled={consolidatingAll || consolidating}>
+                    {consolidatingAll ? <Spinner size={14} /> : null}
+                    应用全部 Agent
+                  </button>
+                </div>
+              </div>
             </div>
           </div>
         )}
 
         {tab === 'topics' && (
           <TopicsTab agentId={agentId} agentName={agent.name} />
+        )}
+
+        {tab === 'reviews' && (
+          <ReviewRecordList
+            records={reviews}
+            emptyTitle="还没有评审历史"
+            emptyDesc="当这个 Agent 参与 topic close review 或 hot interaction review 后，这里会显示完整记录。"
+            onOpenTopic={(topicId) => navigate(`/topics/${topicId}`)}
+          />
         )}
       </div>
 
@@ -154,6 +246,7 @@ function getPendingPosts(posts: PostOut[], agentId: string, agentName: string): 
 }
 
 function TopicsTab({ agentId, agentName }: { agentId: string; agentName: string }) {
+  const navigate = useNavigate()
   const [joinedTopics, setJoinedTopics] = useState<AgentTopicOut[]>([])
   const [allTopics, setAllTopics] = useState<TopicOut[]>([])
   // posts keyed by topicId
@@ -163,6 +256,10 @@ function TopicsTab({ agentId, agentName }: { agentId: string; agentName: string 
   const [decisions, setDecisions] = useState<Record<string, DecisionOut>>({})
   const [participating, setParticipating] = useState<Record<string, boolean>>({})
   const [joining, setJoining] = useState<Record<string, boolean>>({})
+  const [multiPanel, setMultiPanel] = useState<string | null>(null)
+  const [multiRounds, setMultiRounds] = useState<Record<string, number>>({})
+  const [multiParticipating, setMultiParticipating] = useState<Record<string, boolean>>({})
+  const [multiDecisions, setMultiDecisions] = useState<Record<string, DecisionOut[]>>({})
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -225,6 +322,26 @@ function TopicsTab({ agentId, agentName }: { agentId: string; agentName: string 
     }
   }
 
+  const handleParticipateMulti = async (topicId: string) => {
+    const rounds = multiRounds[topicId] ?? 3
+    setMultiParticipating(prev => ({ ...prev, [topicId]: true }))
+    try {
+      const ds = await topicsApi.participateMulti(topicId, { agent_id: agentId, rounds })
+      setMultiDecisions(prev => ({ ...prev, [topicId]: ds }))
+      setMultiPanel(null)
+      const [updated, newPosts] = await Promise.all([
+        agentsApi.getTopics(agentId),
+        topicsApi.listPosts(topicId).catch(() => [] as PostOut[]),
+      ])
+      setJoinedTopics(updated)
+      setTopicPosts(prev => ({ ...prev, [topicId]: newPosts }))
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Multi-round participate failed')
+    } finally {
+      setMultiParticipating(prev => ({ ...prev, [topicId]: false }))
+    }
+  }
+
   if (loading) return <LoadingCenter />
 
   return (
@@ -248,9 +365,13 @@ function TopicsTab({ agentId, agentName }: { agentId: string; agentName: string 
             {joinedTopics.map(t => {
               const decision = decisions[t.id]
               const isParticipating = participating[t.id]
+              const isMultiParticipating = multiParticipating[t.id]
               const isClosed = t.lifecycle === 'closed'
               const posts = topicPosts[t.id] ?? []
               const pending = getPendingPosts(posts, agentId, agentName)
+              const isPanelOpen = multiPanel === t.id
+              const rounds = multiRounds[t.id] ?? 3
+              const multiResult = multiDecisions[t.id]
 
               return (
                 <div key={t.id} className="card" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
@@ -268,18 +389,77 @@ function TopicsTab({ agentId, agentName }: { agentId: string; agentName: string 
                         )}
                       </div>
                     </div>
-                    {!isClosed && (
+                    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                      <button
+                        className="btn btn-ghost btn-sm"
+                        onClick={() => navigate(`/topics/${t.id}`)}
+                      >
+                        查看话题
+                      </button>
+                      {!isClosed && (
+                        <>
+                          <button
+                            className="btn btn-primary btn-sm"
+                            onClick={() => handleParticipate(t.id)}
+                            disabled={isParticipating || isMultiParticipating}
+                            title="Agent 读取话题动态，自主决策一次"
+                          >
+                            {isParticipating ? <Spinner size={14} /> : '⚡'}
+                            参与一次
+                          </button>
+                          <button
+                            className={`btn btn-sm ${isPanelOpen ? 'btn-primary' : 'btn-secondary'}`}
+                            onClick={() => setMultiPanel(isPanelOpen ? null : t.id)}
+                            disabled={isParticipating || isMultiParticipating}
+                            title="连续参与多轮"
+                          >
+                            多轮参与
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Multi-round inline panel */}
+                  {isPanelOpen && !isClosed && (
+                    <div style={{
+                      display: 'flex', gap: 10, alignItems: 'flex-end', flexWrap: 'wrap',
+                      padding: '10px 12px',
+                      background: 'var(--secondary)',
+                      borderRadius: 'var(--radius)',
+                    }}>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                        <label style={{ fontSize: 11, color: 'var(--muted-foreground)' }}>轮数（1–20）</label>
+                        <input
+                          className="form-input"
+                          type="number"
+                          min={1}
+                          max={20}
+                          style={{ width: 80 }}
+                          value={rounds}
+                          onChange={e => setMultiRounds(prev => ({
+                            ...prev,
+                            [t.id]: Math.max(1, Math.min(20, Number(e.target.value))),
+                          }))}
+                        />
+                      </div>
                       <button
                         className="btn btn-primary btn-sm"
-                        onClick={() => handleParticipate(t.id)}
-                        disabled={isParticipating}
-                        title="Agent 读取话题动态，自主决策一次"
+                        onClick={() => handleParticipateMulti(t.id)}
+                        disabled={isMultiParticipating}
                       >
-                        {isParticipating ? <Spinner size={14} /> : '⚡'}
-                        参与一次
+                        {isMultiParticipating ? <Spinner size={14} /> : null}
+                        执行
                       </button>
-                    )}
-                  </div>
+                      <button
+                        className="btn btn-ghost btn-sm"
+                        onClick={() => setMultiPanel(null)}
+                        disabled={isMultiParticipating}
+                      >
+                        取消
+                      </button>
+                    </div>
+                  )}
 
                   {/* Pending posts — replies / mentions */}
                   {pending.length > 0 && !isClosed && (
@@ -293,15 +473,15 @@ function TopicsTab({ agentId, agentName }: { agentId: string; agentName: string 
                           post={post}
                           allPosts={posts}
                           agentId={agentId}
-                          isParticipating={isParticipating}
+                          isParticipating={isParticipating || isMultiParticipating}
                           onReply={() => handleParticipate(t.id)}
                         />
                       ))}
                     </div>
                   )}
 
-                  {/* Last decision result */}
-                  {decision && (
+                  {/* Last single-round decision */}
+                  {decision && !multiResult && (
                     <div style={{
                       display: 'flex', alignItems: 'flex-start', gap: 10,
                       padding: '8px 12px',
@@ -311,6 +491,30 @@ function TopicsTab({ agentId, agentName }: { agentId: string; agentName: string 
                     }}>
                       <span className={`decision-action ${decision.action}`}>{decision.action}</span>
                       <span className="text-muted">{decision.reason}</span>
+                    </div>
+                  )}
+
+                  {/* Multi-round result summary */}
+                  {multiResult && (
+                    <div style={{
+                      padding: '8px 12px',
+                      background: 'var(--secondary)',
+                      borderRadius: 'var(--radius)',
+                      fontSize: 13,
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: 6,
+                    }}>
+                      <div style={{ fontWeight: 500, marginBottom: 2 }}>
+                        完成 {multiResult.length} 轮参与
+                      </div>
+                      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                        {multiResult.map((d, i) => (
+                          <span key={i} className={`decision-action ${d.action}`} title={d.reason}>
+                            {i + 1}. {d.action}
+                          </span>
+                        ))}
+                      </div>
                     </div>
                   )}
                 </div>
@@ -336,14 +540,22 @@ function TopicsTab({ agentId, agentName }: { agentId: string; agentName: string 
                     <span>👥 {t.member_count} agents</span>
                   </div>
                 </div>
-                <button
-                  className="btn btn-secondary btn-sm"
-                  onClick={() => handleJoin(t.id)}
-                  disabled={joining[t.id]}
-                >
-                  {joining[t.id] ? <Spinner size={14} /> : null}
-                  加入
-                </button>
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                  <button
+                    className="btn btn-ghost btn-sm"
+                    onClick={() => navigate(`/topics/${t.id}`)}
+                  >
+                    查看
+                  </button>
+                  <button
+                    className="btn btn-secondary btn-sm"
+                    onClick={() => handleJoin(t.id)}
+                    disabled={joining[t.id]}
+                  >
+                    {joining[t.id] ? <Spinner size={14} /> : null}
+                    加入
+                  </button>
+                </div>
               </div>
             ))}
           </div>

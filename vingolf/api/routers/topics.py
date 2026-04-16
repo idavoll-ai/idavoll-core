@@ -9,9 +9,13 @@ from vingolf.api.schemas import (
     CreateTopicRequest,
     DecisionOut,
     DimensionScoresOut,
+    GrowthDirectiveOut,
     JoinTopicRequest,
+    MultiParticipateRequest,
     ParticipateRequest,
     PostOut,
+    ReviewRecordOut,
+    ReviewStrategyResultOut,
     TopicOut,
     TopicReviewSummaryOut,
 )
@@ -54,6 +58,55 @@ def _decision_out(d) -> DecisionOut:
         action=d.action,
         reason=d.reason,
         post_id=d.post_id,
+    )
+
+
+def _review_record_out(record: dict) -> ReviewRecordOut:
+    return ReviewRecordOut(
+        id=record["id"],
+        trigger_type=record["trigger_type"],
+        topic_id=record["topic_id"],
+        session_id=record.get("session_id"),
+        target_type=record["target_type"],
+        target_id=record["target_id"],
+        agent_id=record["agent_id"],
+        agent_name=record["agent_name"],
+        quality_score=record["quality_score"],
+        confidence=record["confidence"],
+        summary=record["summary"],
+        growth_priority=record["growth_priority"],
+        status=record["status"],
+        error_message=record.get("error_message"),
+        created_at=record["created_at"],
+        strategy_results=[
+            ReviewStrategyResultOut(
+                reviewer_name=item["reviewer_name"],
+                status=item["status"],
+                dimension=item["dimension"],
+                score=item["score"],
+                confidence=item["confidence"],
+                evidence=list(item.get("evidence", [])),
+                concerns=list(item.get("concerns", [])),
+                parse_failed=bool(item.get("parse_failed", False)),
+                summary=item["summary"],
+                raw_output=item.get("raw_output", ""),
+            )
+            for item in record.get("strategy_results", [])
+        ],
+        growth_directives=[
+            GrowthDirectiveOut(
+                kind=item["kind"],
+                priority=item["priority"],
+                content=item["content"],
+                rationale=item["rationale"],
+                agent_decision=item.get("agent_decision"),
+                decision_rationale=item.get("decision_rationale"),
+                final_content=item.get("final_content"),
+                decided_at=item.get("decided_at"),
+                ttl_days=item.get("ttl_days"),
+            )
+            for item in record.get("growth_directives", [])
+        ],
     )
 
 
@@ -153,6 +206,19 @@ async def participate(topic_id: str, body: ParticipateRequest) -> DecisionOut:
     return _decision_out(decision)
 
 
+@router.post("/{topic_id}/participate/multi", response_model=list[DecisionOut])
+async def participate_multi(topic_id: str, body: MultiParticipateRequest) -> list[DecisionOut]:
+    """让指定 Agent 在话题中连续参与多轮（最多 20 轮）。
+
+    每轮独立决策，遇到额度耗尽时提前结束。返回每轮的决策列表。
+    """
+    app = state.get_app()
+    _require_topic(app, topic_id)
+    agent = _require_agent(app, body.agent_id)
+    decisions = await app.run_agent_rounds(topic_id, agent, body.rounds)
+    return [_decision_out(d) for d in decisions]
+
+
 @router.post("/{topic_id}/round", response_model=list[DecisionOut])
 async def run_round(topic_id: str) -> list[DecisionOut]:
     """让话题中的全部 Agent 各自跑一次参与决策（一轮）。"""
@@ -207,6 +273,18 @@ async def delete_topic(topic_id: str) -> dict[str, bool]:
     return {"ok": True}
 
 
+@router.post("/{topic_id}/posts/{post_id}/like", response_model=PostOut)
+async def like_post(topic_id: str, post_id: str) -> PostOut:
+    """给指定帖子点赞。当点赞数达到阈值时会自动触发 HotInteractionReview。"""
+    app = state.get_app()
+    _require_topic(app, topic_id)
+    try:
+        post = await app.like_post(topic_id, post_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return _post_out(post)
+
+
 @router.get("/{topic_id}/review", response_model=TopicReviewSummaryOut)
 def get_review(topic_id: str) -> TopicReviewSummaryOut:
     """获取已关闭话题的评审摘要。"""
@@ -218,6 +296,15 @@ def get_review(topic_id: str) -> TopicReviewSummaryOut:
             status_code=404, detail="No review yet — close the topic first"
         )
     return _review_summary_out(summary)
+
+
+@router.get("/{topic_id}/review-records", response_model=list[ReviewRecordOut])
+async def get_review_records(topic_id: str) -> list[ReviewRecordOut]:
+    """返回该 topic 下所有 review records，包括 hot interaction 记录。"""
+    app = state.get_app()
+    _require_topic(app, topic_id)
+    records = await app.get_review_records_for_topic(topic_id)
+    return [_review_record_out(record) for record in records]
 
 
 # ---------------------------------------------------------------------------
@@ -242,6 +329,18 @@ def _review_summary_out(summary) -> TopicReviewSummaryOut:
                 average=r.dimensions.average,
             ),
             summary=r.summary,
+            confidence=r.confidence,
+            evidence=list(r.evidence),
+            growth_directives=[
+                GrowthDirectiveOut(
+                    kind=d.kind,
+                    priority=d.priority,
+                    content=d.content,
+                    rationale=d.rationale,
+                    ttl_days=d.ttl_days,
+                )
+                for d in r.growth_directives
+            ],
         )
         for r in summary.results
     ]

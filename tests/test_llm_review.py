@@ -272,3 +272,110 @@ def test_dimension_scores_average() -> None:
     from vingolf.plugins.review import DimensionScores
     s = DimensionScores(relevance=8, depth=6, originality=4, engagement=10)
     assert abs(s.average - 7.0) < 0.01
+
+
+# ---------------------------------------------------------------------------
+# Unit: _make_directive
+# ---------------------------------------------------------------------------
+
+def test_make_directive_no_action_when_no_comment() -> None:
+    from vingolf.plugins.review import ReviewPlugin
+    plugin = ReviewPlugin()
+    d = plugin._make_directive(final_score=8.0, comment=None, topic_title="test")
+    assert d.kind == "no_action"
+    assert d.priority == "low"
+    assert d.content == ""
+
+
+def test_make_directive_memory_candidate_above_threshold() -> None:
+    from vingolf.plugins.review import ReviewPlugin
+    from vingolf.config import ReviewConfig
+    plugin = ReviewPlugin(ReviewConfig(min_score_for_memory_candidate=7.0))
+    d = plugin._make_directive(final_score=7.5, comment="表达清晰", topic_title="AI 伦理")
+    assert d.kind == "memory_candidate"
+    assert d.priority == "medium"
+    assert d.content == "表达清晰"
+    assert d.ttl_days == 30
+
+
+def test_make_directive_high_priority_memory_candidate() -> None:
+    from vingolf.plugins.review import ReviewPlugin
+    plugin = ReviewPlugin()
+    d = plugin._make_directive(final_score=9.0, comment="卓越贡献", topic_title="元宇宙")
+    assert d.kind == "memory_candidate"
+    assert d.priority == "high"
+
+
+def test_make_directive_reflection_candidate_below_threshold() -> None:
+    from vingolf.plugins.review import ReviewPlugin
+    plugin = ReviewPlugin()
+    d = plugin._make_directive(final_score=5.5, comment="缺乏深度", topic_title="气候")
+    assert d.kind == "reflection_candidate"
+    assert d.ttl_days == 14
+
+
+# ---------------------------------------------------------------------------
+# Integration: AgentReviewResult carries growth_directives
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_review_result_contains_growth_directives(fake_llm, tmp_path) -> None:
+    """Each AgentReviewResult must carry at least one GrowthDirective."""
+    app = VingolfApp(
+        IdavollApp(
+            llm=fake_llm,
+            config=IdavollConfig(workspace={"base_dir": tmp_path / "ws"}),
+        )
+    )
+    agent = await app.create_agent("Dave", "勤奋的讨论者")
+    topic = await app.create_topic(
+        title="科技与人文",
+        description="探讨科技进步的人文影响",
+        agents=[agent],
+    )
+    await app.let_agent_participate(topic.id, agent)
+    await app.close_topic(topic.id)
+
+    summary = app.get_review(topic.id)
+    assert summary is not None
+    result = summary.results[0]
+    assert len(result.growth_directives) == 1
+    directive = result.growth_directives[0]
+    assert directive.kind in {"memory_candidate", "policy_candidate", "reflection_candidate", "no_action"}
+    assert directive.priority in {"low", "medium", "high"}
+
+
+@pytest.mark.asyncio
+async def test_leveling_does_not_write_to_agent_memory(fake_llm, tmp_path) -> None:
+    """LevelingPlugin must not call write_fact on agent.memory after a review."""
+    from unittest.mock import MagicMock, patch
+    from vingolf.config import LevelingConfig
+
+    config = VingolfConfig(
+        leveling=LevelingConfig(xp_per_point=10, base_xp_per_level=1000),
+    )
+    app = VingolfApp(
+        IdavollApp(
+            llm=fake_llm,
+            config=IdavollConfig(workspace={"base_dir": tmp_path / "ws"}),
+        ),
+        config=config,
+    )
+    agent = await app.create_agent("Eve", "安静的观察者")
+
+    topic = await app.create_topic(
+        title="哲学与科学",
+        description="两种认知方式的对话",
+        agents=[agent],
+    )
+    await app.let_agent_participate(topic.id, agent)
+
+    # Spy on write_fact *after* the agent is fully set up so the real
+    # memory object handles prompt compilation.  We only intercept writes.
+    spy = MagicMock(return_value=True)
+    if agent.memory is not None:
+        agent.memory.write_fact = spy
+
+    await app.close_topic(topic.id)
+
+    spy.assert_not_called()

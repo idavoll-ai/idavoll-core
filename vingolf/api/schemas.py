@@ -67,6 +67,11 @@ class ParticipateRequest(BaseModel):
     agent_id: str = Field(..., description="发起一次参与决策的 Agent ID")
 
 
+class MultiParticipateRequest(BaseModel):
+    agent_id: str = Field(..., description="Agent ID")
+    rounds: int = Field(default=3, ge=1, le=20, description="让该 Agent 连续参与的轮数（1–20）")
+
+
 class PostOut(BaseModel):
     id: str
     topic_id: str
@@ -107,6 +112,31 @@ class DimensionScoresOut(BaseModel):
     average: float
 
 
+class GrowthDirectiveOut(BaseModel):
+    kind: str          # memory_candidate | reflection_candidate | no_action | policy_candidate
+    priority: str      # low | medium | high
+    content: str
+    rationale: str
+    agent_decision: str | None = None
+    decision_rationale: str | None = None
+    final_content: str | None = None
+    decided_at: str | None = None
+    ttl_days: int | None = None
+
+
+class ReviewStrategyResultOut(BaseModel):
+    reviewer_name: str
+    status: str
+    dimension: str
+    score: float
+    confidence: float
+    evidence: list[str] = Field(default_factory=list)
+    concerns: list[str] = Field(default_factory=list)
+    parse_failed: bool = False
+    summary: str
+    raw_output: str = ""
+
+
 class AgentReviewResultOut(BaseModel):
     agent_id: str
     agent_name: str
@@ -117,12 +147,36 @@ class AgentReviewResultOut(BaseModel):
     final_score: float
     dimensions: DimensionScoresOut
     summary: str
+    # Phase 2/3 fields
+    confidence: float = 1.0
+    evidence: list[str] = Field(default_factory=list)
+    growth_directives: list[GrowthDirectiveOut] = Field(default_factory=list)
 
 
 class TopicReviewSummaryOut(BaseModel):
     topic_id: str
     topic_title: str
     results: list[AgentReviewResultOut]
+
+
+class ReviewRecordOut(BaseModel):
+    id: str
+    trigger_type: str
+    topic_id: str
+    session_id: str | None = None
+    target_type: str
+    target_id: str
+    agent_id: str
+    agent_name: str
+    quality_score: float
+    confidence: float
+    summary: str
+    growth_priority: str
+    status: str
+    error_message: str | None = None
+    created_at: str
+    strategy_results: list[ReviewStrategyResultOut] = Field(default_factory=list)
+    growth_directives: list[GrowthDirectiveOut] = Field(default_factory=list)
 
 
 class AgentProgressOut(BaseModel):

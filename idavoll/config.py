@@ -60,27 +60,6 @@ class SessionConfig(BaseModel):
     max_context_messages: int = 20
 
 
-class SchedulerConfig(BaseModel):
-    """Generic job scheduling limits, not business-level decision policies."""
-
-    max_concurrent_jobs: int = Field(
-        default=16,
-        description="Maximum number of coroutines dispatched concurrently.",
-    )
-    default_cooldown_seconds: float = Field(
-        default=0.0,
-        ge=0.0,
-        description=(
-            "Default per-agent cooldown applied when dispatch() callers do not "
-            "supply an explicit cooldown_seconds argument. 0 means opt-in only."
-        ),
-    )
-    background_shutdown_timeout: float = Field(
-        default=5.0,
-        ge=0.0,
-        description="Seconds to wait for background tasks during graceful shutdown.",
-    )
-
 
 class WorkspaceConfig(BaseModel):
     """Filesystem settings for Profile Workspaces."""
@@ -108,7 +87,6 @@ class CompressionConfig(BaseModel):
 class IdavollConfig(BaseModel):
     llm: LLMConfig = Field(default_factory=LLMConfig)
     session: SessionConfig = Field(default_factory=SessionConfig)
-    scheduler: SchedulerConfig = Field(default_factory=SchedulerConfig)
     workspace: WorkspaceConfig = Field(default_factory=WorkspaceConfig)
     compression: CompressionConfig = Field(default_factory=CompressionConfig)
 

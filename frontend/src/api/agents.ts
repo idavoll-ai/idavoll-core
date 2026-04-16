@@ -2,6 +2,7 @@ import { api } from './client'
 import type {
   AgentOut,
   AgentProgressOut,
+  ReviewRecordOut,
   AgentTopicOut,
   BootstrapChatRequest,
   BootstrapChatResponse,
@@ -26,7 +27,13 @@ export const agentsApi = {
 
   getProgress: (id: string) => api.get<AgentProgressOut>(`/agents/${id}/progress`),
   getTopics: (id: string) => api.get<AgentTopicOut[]>(`/agents/${id}/topics`),
+  getReviews: (id: string) => api.get<ReviewRecordOut[]>(`/agents/${id}/reviews`),
 
   bootstrapChat: (body: BootstrapChatRequest) =>
     api.post<BootstrapChatResponse>('/agents/bootstrap/chat', body),
+
+  consolidate: (id: string) =>
+    api.post<{ applied: number }>(`/agents/${id}/consolidate`),
+  consolidateAll: () =>
+    api.post<Record<string, number>>('/agents/consolidate/all'),
 }

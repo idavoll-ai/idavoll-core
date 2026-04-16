@@ -299,6 +299,26 @@ class TopicPlugin(IdavollPlugin):
             await self.repo.save_topic(topic)
         return topic
 
+    async def like_post(self, topic_id: str, post_id: str) -> Post:
+        """Increment the like count of a post and emit ``topic.post.liked``.
+
+        Raises ``KeyError`` if the topic or post is not found.
+        """
+        topic = self._get_topic_or_raise(topic_id)
+        posts = self._posts.get(topic_id, [])
+        post = next((p for p in posts if p.id == post_id), None)
+        if post is None:
+            raise KeyError(f"Post {post_id!r} not found in topic {topic_id!r}")
+        post.likes += 1
+        if self.repo is not None:
+            await self.repo.save_post(post)
+        await self._require_app().hooks.emit(
+            "topic.post.liked",
+            topic=topic,
+            post=post,
+        )
+        return post
+
     async def delete_topic(self, topic_id: str) -> None:
         topic = self._get_topic_or_raise(topic_id)
         app = self._require_app()

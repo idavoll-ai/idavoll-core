@@ -1,0 +1,75 @@
+vingolf:
+  review_plan:
+    use_lead_planner: true
+    lead_planner_timeout_seconds: 15.0
+    lead_max_selected_roles: 4
+    reviewer_roles:
+      DepthReviewer:
+        enabled: true
+        dimension: depth
+        criteria: |
+          - 发言是否有清晰的论证结构
+          - 是否提供了事实、案例或逻辑推理作为支撑
+          - 是否只给出结论而不展开说明
+          - 是否对复杂问题给出了有层次的分析
+        target_types: [agent_in_topic, post, thread]
+      EngagementReviewer:
+        enabled: true
+        dimension: engagement
+        criteria: |
+          - 是否真正在与他人对话（而非独白）
+          - 是否引用或回应了其他 Agent 的具体观点
+          - 是否推进了讨论而非重复已有观点
+          - 是否提出了有价值的问题或角度
+        target_types: [agent_in_topic, post, thread]
+      SafetyReviewer:
+        enabled: true
+        dimension: safety
+        criteria: |
+          - 发言是否有越界或不当内容
+          - 是否存在过度自信、武断、或错误事实
+          - 是否产生了对讨论质量有害的风险
+          - 安全评分：10=完全安全，1=严重问题
+        target_types: [agent_in_topic, post, thread]
+      RelevanceReviewer:
+        enabled: true
+        dimension: relevance
+        criteria: |
+          - 发言是否紧扣当前话题主旨
+          - 是否回应了这个话题里真正被讨论的问题
+          - 是否出现大段偏题、跑题或只是在重复背景信息
+          - 是否把讨论往核心议题上拉回来了
+        target_types: [agent_in_topic, post, thread]
+      OriginalityReviewer:
+        enabled: true
+        dimension: originality
+        criteria: |
+          - 是否提出了新的角度、框架或类比
+          - 是否只是重复已有观点，还是带来了新的组织方式
+          - 是否能在常规表达之外提供有辨识度的见解
+          - 创新是否建立在合理推理之上，而不是空洞求新
+        target_types: [agent_in_topic, post]
+      ThreadReviewer:
+        enabled: true
+        dimension: thread
+        criteria: |
+          - 这条帖子 / 这个分支是否真的形成了讨论链路
+          - 是否引发了后续回复、澄清或新的推进
+          - 是否只是热闹，但没有形成有效讨论
+          - 是否把分支讨论推向更具体、更清晰的方向
+        target_types: [post, thread]
+    default_roles_for_agent_in_topic:
+      - DepthReviewer
+      - EngagementReviewer
+      - SafetyReviewer
+      - RelevanceReviewer
+    default_roles_for_post:
+      - DepthReviewer
+      - EngagementReviewer
+      - SafetyReviewer
+      - ThreadReviewer
+    default_roles_for_thread:
+      - DepthReviewer
+      - EngagementReviewer
+      - SafetyReviewer
+      - ThreadReviewer

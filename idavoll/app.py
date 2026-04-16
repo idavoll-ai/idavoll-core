@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 from .config import IdavollConfig
 from .llm.adapter import LLMAdapter
 from .memory.builtin import BuiltinMemoryProvider
+from .memory.flush import flush_memories
 from .memory.manager import MemoryManager
 from .session.compressor import ContextCompressor
 from .session.search import SessionSearch
@@ -37,13 +38,12 @@ from .plugin.base import IdavollPlugin
 from .plugin.hooks import HookBus
 from .prompt.compiler import PromptCompiler
 from .safety.scanner import SafetyScanner
-from .scheduling.scheduler import Scheduler
 from .session.session import Session
-from .tools.builtin import memory, session_search, skill_get, skill_patch
+from .tools.builtin import memory, reflect, session_search, skill_get, skill_patch
 from .tools.registry import ToolRegistry, Toolset, ToolSpec, ToolsetManager
+from .subagent.runtime import SubagentRuntime
+from .subagent.tool import TASK_TOOL_SPEC_BASE, task_tool_fn
 
-
-JobScheduler = Scheduler
 
 
 class SessionManager:
@@ -100,10 +100,6 @@ class IdavollApp:
         self.toolsets = ToolsetManager(self.tool_registry)
         self.agents = AgentRegistry(toolsets=self.toolsets)
         self.sessions = SessionManager()
-        self.scheduler = Scheduler(
-            max_concurrent_jobs=self._config.scheduler.max_concurrent_jobs,
-            default_cooldown_seconds=self._config.scheduler.default_cooldown_seconds,
-        )
         self.llm = LLMAdapter(llm)
         self.safety_scanner = SafetyScanner()
         self.prompt_compiler = PromptCompiler(
@@ -116,7 +112,9 @@ class IdavollApp:
         )
         self._plugins: list[IdavollPlugin] = []
         self._agent_loader: AgentLoader | None = None
+        self.subagent_runtime = SubagentRuntime(self)
         self._register_builtin_tools()
+        self._register_builtin_hooks()
 
     @classmethod
     def from_config(cls, config: IdavollConfig, api_key: str | None = None) -> "IdavollApp":
@@ -125,14 +123,14 @@ class IdavollApp:
 
     def _register_builtin_tools(self) -> None:
         """Register Core builtin tools and define their default toolsets."""
-        for fn in (memory, session_search, skill_get, skill_patch):
+        for fn in (memory, reflect, session_search, skill_get, skill_patch):
             spec: ToolSpec = getattr(fn, "__tool_spec__")
             self.tool_registry.register(spec)
 
         self.toolsets.define(Toolset(
             name="memory",
-            tools=["memory", "session_search"],
-            description="Agent 长期记忆管理与历史 session 搜索",
+            tools=["memory", "reflect", "session_search"],
+            description="Agent 长期记忆管理、自主反思与历史 session 搜索",
         ))
         self.toolsets.define(Toolset(
             name="skills",
@@ -144,6 +142,27 @@ class IdavollApp:
             includes=["memory", "skills"],
             description="Core 全部内置工具",
         ))
+
+        # task_tool: _runtime pre-bound here; _agent bound later by _bind_agent_tools
+        task_spec = dataclasses.replace(
+            TASK_TOOL_SPEC_BASE,
+            fn=functools.partial(task_tool_fn, _runtime=self.subagent_runtime),
+        )
+        self.tool_registry.register(task_spec)
+        self.toolsets.define(Toolset(
+            name="task",
+            tools=["task_tool"],
+            description="子任务委派能力（task_tool）",
+        ))
+
+    def _register_builtin_hooks(self) -> None:
+        """Register Core built-in hook listeners."""
+        llm = self.llm
+
+        async def _on_pre_compress(agent: "Agent", session: "Session", **_: object) -> None:
+            await flush_memories(agent, session, llm)
+
+        self.hooks.on("on_pre_compress", _on_pre_compress)
 
     @staticmethod
     def _bind_agent_tools(agent: "Agent") -> None:

@@ -7,6 +7,7 @@ from vingolf.api import state
 from vingolf.api.schemas import (
     AgentOut,
     AgentProgressOut,
+    GrowthDirectiveOut,
     AgentTopicOut,
     BootstrapChatRequest,
     BootstrapChatResponse,
@@ -14,6 +15,8 @@ from vingolf.api.schemas import (
     MembershipOut,
     RefineSoulRequest,
     RefineSoulTextRequest,
+    ReviewRecordOut,
+    ReviewStrategyResultOut,
     SoulPreviewOut,
 )
 
@@ -29,6 +32,55 @@ def _agent_out(app, agent) -> AgentOut:
         level=progress.level if progress else 1,
         xp=progress.xp if progress else 0,
         context_budget=agent.profile.budget.total,
+    )
+
+
+def _review_record_out(record: dict) -> ReviewRecordOut:
+    return ReviewRecordOut(
+        id=record["id"],
+        trigger_type=record["trigger_type"],
+        topic_id=record["topic_id"],
+        session_id=record.get("session_id"),
+        target_type=record["target_type"],
+        target_id=record["target_id"],
+        agent_id=record["agent_id"],
+        agent_name=record["agent_name"],
+        quality_score=record["quality_score"],
+        confidence=record["confidence"],
+        summary=record["summary"],
+        growth_priority=record["growth_priority"],
+        status=record["status"],
+        error_message=record.get("error_message"),
+        created_at=record["created_at"],
+        strategy_results=[
+            ReviewStrategyResultOut(
+                reviewer_name=item["reviewer_name"],
+                status=item["status"],
+                dimension=item["dimension"],
+                score=item["score"],
+                confidence=item["confidence"],
+                evidence=list(item.get("evidence", [])),
+                concerns=list(item.get("concerns", [])),
+                parse_failed=bool(item.get("parse_failed", False)),
+                summary=item["summary"],
+                raw_output=item.get("raw_output", ""),
+            )
+            for item in record.get("strategy_results", [])
+        ],
+        growth_directives=[
+            GrowthDirectiveOut(
+                kind=item["kind"],
+                priority=item["priority"],
+                content=item["content"],
+                rationale=item["rationale"],
+                agent_decision=item.get("agent_decision"),
+                decision_rationale=item.get("decision_rationale"),
+                final_content=item.get("final_content"),
+                decided_at=item.get("decided_at"),
+                ttl_days=item.get("ttl_days"),
+            )
+            for item in record.get("growth_directives", [])
+        ],
     )
 
 
@@ -192,6 +244,16 @@ def get_agent_topics(agent_id: str) -> list[AgentTopicOut]:
     return result
 
 
+@router.get("/{agent_id}/reviews", response_model=list[ReviewRecordOut])
+async def get_agent_reviews(agent_id: str) -> list[ReviewRecordOut]:
+    """返回该 Agent 的最近 review records，包括 hot interactions。"""
+    app = state.get_app()
+    if app.agents.get(agent_id) is None:
+        raise HTTPException(status_code=404, detail=f"Agent {agent_id!r} not found")
+    records = await app.get_review_records_for_agent(agent_id)
+    return [_review_record_out(record) for record in records]
+
+
 # ---------------------------------------------------------------------------
 # Progress
 # ---------------------------------------------------------------------------
@@ -218,3 +280,28 @@ async def delete_agent(agent_id: str) -> dict[str, bool]:
         raise HTTPException(status_code=404, detail=f"Agent {agent_id!r} not found")
     await app.delete_agent(agent_id)
     return {"ok": True}
+
+
+@router.post("/{agent_id}/consolidate")
+async def consolidate_agent(agent_id: str) -> dict[str, int]:
+    """将该 Agent 的 pending GrowthDirectives 批量提升：
+    memory_candidate → 写入长期 memory；reflection_candidate → 触发 hook。
+    返回 {"applied": N}。
+    """
+    app = state.get_app()
+    if app.agents.get(agent_id) is None:
+        raise HTTPException(status_code=404, detail=f"Agent {agent_id!r} not found")
+    if app.consolidation is None:
+        raise HTTPException(status_code=503, detail="ConsolidationService not available (call startup first)")
+    applied = await app.consolidation.consolidate(agent_id)
+    return {"applied": applied}
+
+
+@router.post("/consolidate/all")
+async def consolidate_all() -> dict[str, int]:
+    """对所有 Agent 执行一次 GrowthDirective 合并。返回 {agent_id: applied_count}。"""
+    app = state.get_app()
+    if app.consolidation is None:
+        raise HTTPException(status_code=503, detail="ConsolidationService not available")
+    result = await app.consolidation.consolidate_all()
+    return result

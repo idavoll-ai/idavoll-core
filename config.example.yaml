@@ -29,6 +29,13 @@ vingolf:
     max_post_chars: 3000
     composite_weight: 0.5
     likes_weight: 0.5
+    # Phase 2: multi-reviewer team. Reviewer planning / role catalog live in
+    # the separate review_plan.example.yaml file.
+    use_team: false
+    reviewer_timeout_seconds: 30.0
+    # Phase 3: trigger a targeted review when a post reaches the like threshold
+    hot_interaction_enabled: false
+    hot_interaction_likes_threshold: 5
 
   leveling:
     xp_per_point: 10
