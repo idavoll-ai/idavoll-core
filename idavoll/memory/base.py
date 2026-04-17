@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Literal
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..tools.registry import ToolSpec
 
 
 class MemoryProvider(ABC):
@@ -10,22 +13,26 @@ class MemoryProvider(ABC):
     Core contract
     -------------
     system_prompt_block()
-        Returns a static markdown block that is compiled into the system
-        prompt *once* at session start and frozen for the entire session.
+        Returns a static markdown block compiled into the system prompt *once*
+        at session start and frozen for the entire session.
 
     prefetch(query, context)
-        Called at the start of each turn to retrieve memories relevant to
-        the current message.  Returns a short string injected as
+        Called at the start of each turn to retrieve memories relevant to the
+        current message.  Returns a short string injected as
         ``<memory-context>`` before the user message.
 
     sync_turn(user_msg, assistant_msg)
         Called after each completed turn so providers can update internal
-        state.  For the builtin provider this is a no-op; actual durable
-        writes are driven by the Self-Growth Engine.
+        state.  For the builtin provider this is a no-op; durable writes are
+        driven by the memory tool calling MemoryStore directly.
 
-    write_fact(content, target)  [optional]
-        Persist a durable fact extracted by the Self-Growth Engine.
-        Providers that do not support writes simply return False.
+    Optional hooks
+    --------------
+    on_memory_write(action, target, content)
+        Notified after the builtin MemoryStore completes a write.  External
+        providers implement this to mirror writes into their own backend
+        (e.g. a vector DB or remote API).  The builtin provider is skipped
+        — it is the source of the write.
     """
 
     @abstractmethod
@@ -40,34 +47,36 @@ class MemoryProvider(ABC):
     async def sync_turn(self, user_msg: str, assistant_msg: str) -> None:
         """Record a completed turn (may be a no-op for simple providers)."""
 
-    def write_fact(
+    # ------------------------------------------------------------------
+    # Optional hook — override in external providers
+    # ------------------------------------------------------------------
+
+    def on_memory_write(
         self,
+        action: str,
+        target: str,
         content: str,
-        target: Literal["memory", "user"] = "memory",
-    ) -> bool:
-        """Persist a durable fact.  Returns True if written, False if unsupported."""
-        return False
+    ) -> None:
+        """Called after a builtin MemoryStore write completes.
 
-    def replace_fact(
-        self,
-        old_text: str,
-        new_content: str,
-        target: Literal["memory", "user"] = "memory",
-    ) -> bool:
-        """Replace an existing fact.  Returns True if replaced, False if unsupported."""
-        return False
+        *action* is ``"add"``, ``"replace"``, or ``"remove"``.
+        *target* is ``"memory"`` or ``"user"``.
+        *content* is the fact text (empty string for ``"remove"``).
 
-    def remove_fact(
-        self,
-        old_text: str,
-        target: Literal["memory", "user"] = "memory",
-    ) -> bool:
-        """Remove an existing fact.  Returns True if removed, False if unsupported."""
-        return False
+        The default implementation is a no-op.  External providers override
+        this to mirror writes into their own backend.
+        """
 
-    def read_facts(
-        self,
-        target: Literal["memory", "user"] = "memory",
-    ) -> list[str]:
-        """Return all current facts.  Returns empty list if unsupported."""
+    def get_tool_specs(self) -> list["ToolSpec"]:
+        """Return tool specs contributed by this provider.
+
+        External providers override this to expose additional tools to the
+        agent (e.g. a ``fact_store`` search tool backed by a vector DB).
+        The returned specs are merged into the agent's active tool list at
+        session setup time and on every toolset unlock.
+
+        The builtin provider returns an empty list — its tools (``memory``,
+        ``session_search``) are registered through the normal ToolRegistry
+        path and do not need to be declared here.
+        """
         return []

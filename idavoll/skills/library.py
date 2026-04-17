@@ -1,12 +1,9 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 from .model import Skill, parse_skill, render_skill, to_kebab
-
-if TYPE_CHECKING:
-    from ..agent.workspace import ProfileWorkspace
 
 
 def _now_iso() -> str:
@@ -14,11 +11,10 @@ def _now_iso() -> str:
 
 
 class SkillsLibrary:
-    """Manages the Agent's skills collection via the workspace semantic API.
+    """Manages the Agent's skills collection backed by a skills directory.
 
     Each skill is stored as a SKILL.md document identified by its kebab-case
-    name.  All filesystem details are hidden behind the workspace interface —
-    SkillsLibrary never touches paths directly.
+    name under ``<skills_path>/<name>/SKILL.md``.
 
     Lifecycle methods
     -----------------
@@ -30,8 +26,8 @@ class SkillsLibrary:
     build_index — compact markdown string for the static system prompt.
     """
 
-    def __init__(self, workspace: "ProfileWorkspace") -> None:
-        self._workspace = workspace
+    def __init__(self, skills_path: Path) -> None:
+        self._path = skills_path
 
     # ------------------------------------------------------------------
     # CRUD
@@ -46,7 +42,7 @@ class SkillsLibrary:
     ) -> Skill:
         """Create a new skill.  Raises ``FileExistsError`` if name already exists."""
         name = to_kebab(name)
-        if self._workspace.skill_exists(name):
+        if self._skill_exists(name):
             raise FileExistsError(
                 f"Skill {name!r} already exists. Use patch() to update it."
             )
@@ -94,17 +90,13 @@ class SkillsLibrary:
     def get(self, name: str) -> Skill | None:
         """Return the named skill, or ``None`` if it does not exist."""
         name = to_kebab(name)
-        if not self._workspace.skill_exists(name):
+        if not self._skill_exists(name):
             return None
-        return parse_skill(self._workspace.read_skill_doc(name), name=name)
+        return parse_skill(self._read_doc(name), name=name)
 
     def list_active(self) -> list[Skill]:
         """Return all skills with ``status == 'active'``, sorted by name."""
-        return [
-            skill
-            for skill in self._load_all()
-            if skill.status == "active"
-        ]
+        return [skill for skill in self._load_all() if skill.status == "active"]
 
     def list_all(self) -> list[Skill]:
         """Return all skills regardless of status."""
@@ -142,17 +134,31 @@ class SkillsLibrary:
     # Internal helpers
     # ------------------------------------------------------------------
 
+    def _skill_exists(self, name: str) -> bool:
+        return (self._path / name / "SKILL.md").exists()
+
+    def _list_names(self) -> list[str]:
+        if not self._path.exists():
+            return []
+        return sorted(p.parent.name for p in self._path.glob("*/SKILL.md"))
+
+    def _read_doc(self, name: str) -> str:
+        p = self._path / name / "SKILL.md"
+        return p.read_text(encoding="utf-8") if p.exists() else ""
+
+    def _write_doc(self, name: str, text: str) -> None:
+        p = self._path / name / "SKILL.md"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text, encoding="utf-8")
+
     def _load_all(self) -> list[Skill]:
-        return [
-            parse_skill(self._workspace.read_skill_doc(name), name=name)
-            for name in self._workspace.list_skill_names()
-        ]
+        return [parse_skill(self._read_doc(name), name=name) for name in self._list_names()]
 
     def _load_or_raise(self, name: str) -> Skill:
         name = to_kebab(name)
-        if not self._workspace.skill_exists(name):
+        if not self._skill_exists(name):
             raise FileNotFoundError(f"Skill {name!r} not found.")
-        return parse_skill(self._workspace.read_skill_doc(name), name=name)
+        return parse_skill(self._read_doc(name), name=name)
 
     def _write(self, skill: Skill) -> None:
-        self._workspace.write_skill_doc(skill.name, render_skill(skill))
+        self._write_doc(skill.name, render_skill(skill))

@@ -1,88 +1,214 @@
-# Memory 模块
+# Memory
 
 ## 概述
 
-`idavoll/memory/` 实现 Agent 的记忆系统，分为三层：抽象接口、内置实现、记忆管理器。事实写入由 Agent 在对话中通过内置 `memory` 工具主动触发，Session 关闭后由产品层负责持久化原始对话。
+当前 memory 系统被拆成 4 层：
+
+1. `MemoryStore`
+2. `MemoryProvider`
+3. `BuiltinMemoryProvider`
+4. `MemoryManager`
+
+再加两个运行时协作者：
+
+- `memory` / `reflect` tools
+- `flush_memories()`
+
+这套结构的核心变化是：
+
+- 事实 CRUD 不再走 `MemoryManager`
+- durable write 直接落到 `MemoryStore`
+- `MemoryManager` 只负责 provider 编排和写后广播
 
 ---
 
-## 抽象接口（`base.py`）
+## `MemoryStore`
 
-`MemoryProvider` 是所有记忆后端的抽象基类，定义三个核心生命周期方法：
+`idavoll/memory/store.py` 是 durable facts 的唯一文件 I/O 层。
 
-| 方法 | 调用时机 | 说明 |
-|------|----------|------|
-| `system_prompt_block()` | Session 启动时，一次 | 返回注入 System Prompt 的静态记忆块（冻结） |
-| `prefetch(query, context)` | 每轮对话开始 | 返回与当前消息相关的记忆，注入为 `<memory-context>` |
-| `sync_turn(user_msg, assistant_msg)` | 每轮对话结束 | 通知 Provider 一轮已完成（内置 Provider 为 no-op） |
-| `write_fact(content, target)` | 由认知引擎调用 | 持久化一条事实，返回 True/False |
+管理两个目标文件：
 
----
+- `MEMORY.md`
+- `USER.md`
 
-## 内置实现（`builtin.py`）
+主要能力：
 
-`BuiltinMemoryProvider` 读写 ProfileWorkspace 中的 `MEMORY.md` 和 `USER.md`。
+- `load_snapshot()`
+- `format_for_system_prompt(target)`
+- `read_raw()` / `write_raw()`
+- `read_facts()`
+- `add_fact()`
+- `replace_fact()`
+- `remove_fact()`
 
-### system_prompt_block()
+### Snapshot 合约
 
-在 Session 启动时读取两个文件，合并为：
+`load_snapshot()` 必须在 session 开始时调用一次。  
+它会把当前 MEMORY / USER 内容冻结进 `_snapshot`。
 
-```markdown
-## Agent Memory
+之后：
 
-- 事实1
-- 事实2
+- `format_for_system_prompt()` 永远返回 frozen snapshot
+- 中途工具写入会更新磁盘文件
+- 但不会更新 frozen snapshot
 
-## User Profile
+这样可以保证整个 session 内 system prompt 稳定。
 
-- 用户偏好1
-```
+### 约束
 
-超出 `system_block_token_budget`（默认 400 token）时截断。
+`MemoryStore` 对写入内容做硬约束：
 
-### prefetch(query)
-
-无向量嵌入的关键词召回策略：
-
-1. 从 MEMORY.md 和 USER.md 解析所有 bullet 事实
-2. 对 query 分词，计算每条事实的关键词命中数
-3. 按命中数降序排列，取 top-N 直到达到 `prefetch_token_budget`（默认 200 token）
-4. 返回 `<memory-context>` 块，无匹配时返回空字符串
-
-### write_fact(content, target)
-
-写入持久化事实的硬约束：
-
-- 内容非空
-- 长度 ≤ 500 字符
-- 不含注入模式（由正则检测）
-- 不是已有事实的精确重复（去重）
-
-`target` 可以是 `"memory"` 或 `"user"`，分别写入对应文件。
+- 不能为空
+- 最大长度 500 字符
+- 禁止 prompt injection 关键词
+- `replace/remove` 使用 substring match，并在歧义时抛错
 
 ---
 
-## 记忆管理器（`manager.py`）
+## `MemoryProvider`
 
-`MemoryManager` 是 Session 运行时对记忆的唯一入口，支持挂载多个 `MemoryProvider`。
+`idavoll/memory/base.py` 定义 provider 接口：
+
+- `system_prompt_block()`
+- `prefetch(query, context)`
+- `sync_turn(user_msg, assistant_msg)`
+
+可选 hook：
+
+- `on_memory_write(action, target, content)`
+- `get_tool_specs()`
+
+因此 provider 的职责是“为 prompt 和 turn 提供记忆能力”，不是自己做持久文件 CRUD。
+
+---
+
+## `BuiltinMemoryProvider`
+
+`BuiltinMemoryProvider` 是 `MemoryStore -> MemoryProvider` 的适配层。
+
+### `system_prompt_block()`
+
+从 `MemoryStore` 的 frozen snapshot 读取 MEMORY / USER，渲染为 system prompt 块。
+
+输出里会包含：
+
+- 记忆使用规则
+- `MEMORY（你的笔记）`
+- `USER PROFILE（用户档案）`
+
+并受 `system_block_token_budget` 限制。
+
+### `prefetch(query, context)`
+
+当前是 MVP 级关键词召回：
+
+1. 读取 live facts
+2. 用 query + context 做分词
+3. 统计 token 命中数
+4. 返回 top facts
+5. 渲染成 `<memory-context> ... </memory-context>`
+
+它不是 embedding 检索，但接口已经允许后续 provider 替换实现。
+
+### `sync_turn()`
+
+对 builtin provider 来说是 no-op。  
+长期写入不靠 turn 自动总结，而是靠工具层显式写入。
+
+---
+
+## `MemoryManager`
+
+`MemoryManager` 管理一个或多个 `MemoryProvider`。
+
+公开接口：
+
+- `add_provider(provider)`
+- `system_prompt_block()`
+- `prefetch(query, context)`
+- `sync_turn(user_msg, assistant_msg)`
+- `get_tool_specs()`
+- `on_memory_write(action, target, content)`
+
+注意：
+
+- 它不提供 `add_fact()` / `replace_fact()` / `remove_fact()`
+- provider 按注册顺序执行
+- `get_tool_specs()` 会去重合并外部 provider 暴露的工具
+
+---
+
+## 工具层
+
+内置 memory 相关工具现在都在 `idavoll/tools/builtin/`：
+
+- `memory`
+- `reflect`
+
+### `memory`
+
+`memory` tool 直接调用 `agent.memory_store`：
+
+- `add`
+- `replace`
+- `remove`
+- `read`
+
+写成功后会调用：
 
 ```python
-manager = MemoryManager()
-manager.add_provider(BuiltinMemoryProvider(workspace))
-# 可继续 add_provider() 挂载向量数据库等外部 Provider
+agent.memory.on_memory_write(...)
 ```
 
-各方法均按注册顺序遍历所有 Provider：
+通知所有 provider 镜像写入。
 
-- `system_prompt_block()` → 合并所有非空块（换行分隔）
-- `prefetch()` → 合并所有 Provider 的返回（换行分隔）
-- `sync_turn()` → 依次通知所有 Provider
-- `write_fact()` → 写入第一个接受写入的 Provider，返回 True
+### `reflect`
+
+`reflect` 用于批量把高阶洞察写入 MEMORY.md。
+
+它适合保存：
+
+- 模式
+- 经验
+- 对话级总结
+
+而不是单条具体事实。
+
+---
+
+## 压缩前补写
+
+`idavoll/memory/flush.py` 的 `flush_memories()` 是 memory 系统和 session compressor 的桥接点。
+
+触发时机：
+
+- `on_pre_compress`
+
+行为：
+
+1. 构造一组仅包含近期对话的 messages
+2. 只暴露 `memory` tool
+3. 给模型一次补写遗漏长期记忆的机会
+
+这意味着 memory 不是只在正常对话里工作，也会在“即将压缩上下文”的边界上被主动调用。
+
+---
+
+## 当前边界
+
+Memory 系统内部边界现在很清楚：
+
+- `MemoryStore`：磁盘真相
+- `BuiltinMemoryProvider`：prompt-facing 读取适配
+- `MemoryManager`：provider orchestration
+- `memory / reflect`：显式写入入口
+- `flush_memories()`：压缩前保护机制
 
 ---
 
 ## 设计原则
 
-- **两类记忆正交**：`system_prompt_block()` 是冻结的静态知识；`prefetch()` 是每轮动态召回，二者服务不同目的
-- **写入由 Agent 主动触发**：`BuiltinMemoryProvider.sync_turn()` 是 no-op，事实写入通过 Agent 在对话中调用内置 `memory` 工具或产品层在 `on_session_end` 钩子中驱动
-- **持久化与召回分离**：记忆写入路径（write_fact）与读取路径（prefetch）完全独立
+- frozen prompt 只读 snapshot，不读 live state
+- durable write 直接走 `MemoryStore`
+- provider 接口负责“取”和“同步”，不负责核心 CRUD
+- 外部 provider 可以镜像写入，也可以贡献额外工具

@@ -7,6 +7,7 @@ from ..registry import tool
 
 if TYPE_CHECKING:
     from ...agent.registry import Agent
+    from ...session.session import Session
 
 
 @tool(
@@ -27,7 +28,7 @@ if TYPE_CHECKING:
         "- replace：修正已有条目（old_text 为定位子串，content 为新内容）\n"
         "- remove：删除已有条目（old_text 为定位子串）\n"
         "- read：查看当前所有条目\n\n"
-        "【不要保存】任务日志、临时 TODO、单次性细节、逐步推理过程。"
+        "【不要保存】任何任务日志、临时 TODO、单次性细节、逐步推理过程。"
     ),
     parameters={
         "type": "object",
@@ -62,33 +63,40 @@ async def memory(
     *,
     _agent: "Agent",
 ) -> str:
-    """Unified memory management tool — add / replace / remove / read."""
-    if _agent.memory is None:
-        return json.dumps({"success": False, "error": "当前 Agent 没有配置 memory provider"})
+    """Unified memory management tool — add / replace / remove / read.
+
+    Writes go directly to MemoryStore (_agent.memory_store) and are then
+    broadcast to any external providers via MemoryManager.on_memory_write.
+    """
+    store = _agent.memory_store
+    if store is None:
+        return json.dumps({"success": False, "error": "当前 Agent 没有配置 memory store"})
 
     if target not in ("memory", "user"):
-        return json.dumps({"success": False, "error": f"无效 target '{target}'，请使用 'memory' 或 'user'"})
+        return json.dumps(
+            {"success": False, "error": f"无效 target '{target}'，请使用 'memory' 或 'user'"}
+        )
 
     if action == "add":
         if not content:
             return json.dumps({"success": False, "error": "add 操作需要 content"})
         try:
-            written = _agent.memory.write_fact(content, target)
+            written = store.add_fact(content, target)
         except ValueError as exc:
             return json.dumps({"success": False, "error": str(exc)})
+
+        _broadcast(_agent, "add", target, content)
+
         if written:
-            facts = _agent.memory.read_facts(target)
-            return json.dumps({
-                "success": True,
-                "message": "已记录。",
-                "entries": facts,
-                "count": len(facts),
-            }, ensure_ascii=False)
-        return json.dumps({
-            "success": True,
-            "message": "该条目已存在，跳过。",
-            "entries": _agent.memory.read_facts(target),
-        }, ensure_ascii=False)
+            facts = store.read_facts(target)
+            return json.dumps(
+                {"success": True, "message": "已记录。", "entries": facts, "count": len(facts)},
+                ensure_ascii=False,
+            )
+        return json.dumps(
+            {"success": True, "message": "该条目已存在，跳过。", "entries": store.read_facts(target)},
+            ensure_ascii=False,
+        )
 
     elif action == "replace":
         if not old_text:
@@ -96,50 +104,55 @@ async def memory(
         if not content:
             return json.dumps({"success": False, "error": "replace 操作需要 content"})
         try:
-            replaced = _agent.memory.replace_fact(old_text, content, target)
+            replaced = store.replace_fact(old_text, content, target)
         except ValueError as exc:
             return json.dumps({"success": False, "error": str(exc)})
         if not replaced:
             return json.dumps({"success": False, "error": f"未找到包含 '{old_text}' 的条目"})
-        facts = _agent.memory.read_facts(target)
-        return json.dumps({
-            "success": True,
-            "message": "已替换。",
-            "entries": facts,
-            "count": len(facts),
-        }, ensure_ascii=False)
+
+        _broadcast(_agent, "replace", target, content)
+
+        facts = store.read_facts(target)
+        return json.dumps(
+            {"success": True, "message": "已替换。", "entries": facts, "count": len(facts)},
+            ensure_ascii=False,
+        )
 
     elif action == "remove":
         if not old_text:
             return json.dumps({"success": False, "error": "remove 操作需要 old_text"})
         try:
-            removed = _agent.memory.remove_fact(old_text, target)
+            removed = store.remove_fact(old_text, target)
         except ValueError as exc:
             return json.dumps({"success": False, "error": str(exc)})
         if not removed:
             return json.dumps({"success": False, "error": f"未找到包含 '{old_text}' 的条目"})
-        facts = _agent.memory.read_facts(target)
-        return json.dumps({
-            "success": True,
-            "message": "已删除。",
-            "entries": facts,
-            "count": len(facts),
-        }, ensure_ascii=False)
+
+        _broadcast(_agent, "remove", target, old_text)
+
+        facts = store.read_facts(target)
+        return json.dumps(
+            {"success": True, "message": "已删除。", "entries": facts, "count": len(facts)},
+            ensure_ascii=False,
+        )
 
     elif action == "read":
-        facts = _agent.memory.read_facts(target)
-        return json.dumps({
-            "success": True,
-            "target": target,
-            "entries": facts,
-            "count": len(facts),
-        }, ensure_ascii=False)
+        facts = store.read_facts(target)
+        return json.dumps(
+            {"success": True, "target": target, "entries": facts, "count": len(facts)},
+            ensure_ascii=False,
+        )
 
     else:
-        return json.dumps({
-            "success": False,
-            "error": f"未知 action '{action}'，请使用 add / replace / remove / read",
-        })
+        return json.dumps(
+            {"success": False, "error": f"未知 action '{action}'，请使用 add / replace / remove / read"}
+        )
+
+
+def _broadcast(agent: "Agent", action: str, target: str, content: str) -> None:
+    """Notify MemoryManager so external providers can mirror the write."""
+    if agent.memory is not None:
+        agent.memory.on_memory_write(action, target, content)
 
 
 @tool(
@@ -162,9 +175,17 @@ async def memory(
         "required": ["query"],
     },
 )
-async def session_search(query: str, *, _agent: "Agent") -> str:
+async def session_search(
+    query: str,
+    *,
+    _agent: "Agent",
+    _session: "Session | None" = None,
+) -> str:
     """Search historical raw session records for relevant past context."""
-    if _agent.session_search is None:
-        return "[session_search] 当前 Agent 没有配置 session search"
-    result = await _agent.session_search.search(query)
+    if _session is None:
+        return "[session_search] 当前没有活动 session"
+    search = _session.services.session_search_for(_agent.id)
+    if search is None:
+        return "[session_search] 当前 session 没有配置 session search"
+    result = await search.search(query)
     return result or "未找到相关历史 session 记录。"

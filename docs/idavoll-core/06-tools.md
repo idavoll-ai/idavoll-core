@@ -1,133 +1,200 @@
-# Tools 模块
+# Tools
 
 ## 概述
 
-`idavoll/tools/` 提供工具注册、工具集管理和 Agent 工具解析机制。框架将"工具是什么"（ToolSpec）与"Agent 有哪些工具"（ToolsetManager）以及"工具怎么执行"（fn 调用）三个关注点分离。
+工具系统由三部分组成：
+
+- `ToolSpec`
+- `ToolRegistry`
+- `ToolsetManager`
+
+再加一层运行时绑定：
+
+- `_runtime`
+- `_agent`
+- `_session`
+
+这意味着“工具声明”和“工具执行上下文”已经被解耦。
 
 ---
 
-## 数据模型（`registry.py`）
+## `ToolSpec`
 
-### ToolSpec
+`ToolSpec` 定义在 `idavoll/tools/registry.py`。
 
-单个工具的元数据：
+字段：
+
+- `name`
+- `description`
+- `parameters`
+- `fn`
+- `tags`
+
+注意：
+
+- `fn` 可以为 `None`
+- 这时工具只参与 prompt 展示，不参与 runtime dispatch
+
+---
+
+## `Toolset`
+
+`Toolset` 用来声明一组工具或组合其它工具集。
+
+字段：
+
+- `name`
+- `tools`
+- `includes`
+- `description`
+
+解析规则是 depth-first：
+
+- 先展开 `includes`
+- 再追加当前 `tools`
+- 保持首次出现顺序
+- 自动去重
+
+---
+
+## `ToolRegistry`
+
+`ToolRegistry` 是全局 append-only 注册表。
+
+提供：
+
+- `register(spec)`
+- `get(name)`
+- `get_or_raise(name)`
+- `all()`
+- `names()`
+- `scan_module(module)`
+- `scan_package(package)`
+
+重复注册同名工具时，后者覆盖前者。
+
+---
+
+## `ToolsetManager`
+
+`ToolsetManager` 负责：
+
+- `define(toolset)`
+- `resolve(enabled_toolsets, disabled_tools=...)`
+- `build_index(enabled_toolsets, disabled_tools=...)`
+
+`resolve()` 返回的是当前 agent 真正可用的 `ToolSpec` 列表。  
+`build_index()` 返回的是给 prompt 用的 markdown 工具索引。
+
+---
+
+## `@tool` 装饰器
+
+`@tool(...)` 会把 `ToolSpec` 挂到函数的 `__tool_spec__` 上。
+
+它不会包裹函数逻辑本身，只做声明注册。
+
+因此工具函数仍然是普通 Python callable，便于：
+
+- 单元测试
+- partial 注入
+- provider 替换
+
+---
+
+## 当前内置工具
+
+Core 当前注册的 builtin tools：
+
+- `memory`
+- `reflect`
+- `session_search`
+- `skill_get`
+- `skill_patch`
+- `task_tool`
+
+对应工具集：
+
+- `memory`
+- `skills`
+- `builtin`
+- `task`
+
+其中：
+
+- `builtin = memory + skills`
+- `task` 单独暴露 subagent delegation 能力
+
+---
+
+## 三层注入模型
+
+这是当前工具系统和旧架构最大的区别之一。
+
+### 1. 注册时注入 `_runtime`
+
+`task_tool` 在 `IdavollApp._register_builtin_tools()` 中用：
 
 ```python
-@dataclass
-class ToolSpec:
-    name: str                        # 工具唯一名称
-    description: str                 # 展示给 LLM 的描述
-    parameters: dict                 # JSON Schema 格式参数定义
-    fn: Callable | None              # 实际可调用实现（可为 None）
-    tags: list[str]
+functools.partial(task_tool_fn, _runtime=self.subagent_runtime)
 ```
 
-`fn` 为 `None` 时，该工具仅用于 Prompt 引导（Agent 知道工具存在但无法在框架内执行）。
+预绑定 runtime。
 
-### Toolset
+### 2. Agent 级注入 `_agent`
 
-工具的命名分组，支持组合继承：
+`IdavollApp._bind_agent_tools()` 会扫描工具签名，给所有声明了 `_agent` 的工具做 partial。
 
-```python
-@dataclass
-class Toolset:
-    name: str
-    tools: list[str]         # 工具名称列表
-    includes: list[str]      # 要合并的其他 Toolset 名称（深度优先）
-    description: str
-```
+这一步通常发生在：
 
-示例：
+- agent 创建
+- agent 加载
+- 工具集解锁后
 
-```python
-# 定义复合工具集
-Toolset(name="builtin", includes=["memory", "skills"])
-# 解析结果：memory 的所有工具 + skills 的所有工具
-```
+### 3. Turn 级注入 `_session`
+
+`IdavollApp._bind_turn_tools()` 会在每次 `generate_response()` / `generate_response_stream()` 里做本轮绑定。
+
+当前最典型的例子就是：
+
+- `session_search(query, *, _agent, _session)`
+
+它需要当前 `Session.services` 才能解析到真正的检索能力，因此不能永久绑到 `Agent` 上。
 
 ---
 
-## ToolRegistry
+## 工具执行循环
 
-全局工具注册表，按 `name` 存储所有 ToolSpec：
+`IdavollApp.generate_response()` 里的 tool loop 逻辑是：
 
-- `register(spec)` — 注册工具，同名则替换（支持热重载）
-- `get(name)` / `get_or_raise(name)` — 查询
-- `scan_module(module)` — 扫描模块中所有 `@tool` 装饰的函数并注册
-- `scan_package(package)` — 递归扫描包及所有子模块
+1. 取出 `callable_tools`
+2. `llm.invoke(..., tools=callable_tools)`
+3. 检查 `AIMessage.tool_calls`
+4. 按 `ToolSpec.name -> spec.fn` 分发
+5. 执行结果封装成 `ToolMessage`
+6. 回到下一轮，直到没有 tool call 或达到安全上限
 
----
+hook 触发点：
 
-## ToolsetManager
-
-管理工具集定义，并为每个 Agent 解析最终工具列表：
-
-### resolve(enabled_toolsets, disabled_tools)
-
-深度优先展开 `enabled_toolsets`，去重，过滤 `disabled_tools`，从 ToolRegistry 查找 ToolSpec：
-
-```
-enabled_toolsets = ["builtin"]
-disabled_tools = ["memory_write"]
-
-展开 builtin:
-  → 展开 memory: ["memory_write", "memory_search"]
-  → 展开 skills: ["skill_get", "skill_patch"]
-  → 合并后去重: ["memory_write", "memory_search", "skill_get", "skill_patch"]
-
-过滤 disabled_tools:
-  → ["memory_search", "skill_get", "skill_patch"]
-
-从 ToolRegistry 查找 ToolSpec:
-  → [ToolSpec(memory_search), ToolSpec(skill_get), ToolSpec(skill_patch)]
-```
-
-未知工具名静默跳过，确保 AgentProfile 可向前兼容。
-
-### build_index(enabled_toolsets, disabled_tools)
-
-渲染为 Prompt 可用的工具索引块（注入 System Prompt Slot [8]）：
-
-```markdown
-## Available Tools
-
-- **memory_search**: 从记忆中检索相关事实
-- **skill_get**: 获取指定技能的详细内容
-```
+- `pre_tool_call`
+- `post_tool_call`
 
 ---
 
-## @tool 装饰器
+## 与 Prompt 的关系
 
-将函数标记为可自动注册的工具：
+Prompt 里展示的 tool list 来自 `ToolsetManager.build_index()`，不是运行时 partial 后的 callable。
 
-```python
-@tool(description="从记忆中检索相关事实")
-async def memory_search(query: str, *, _agent: Agent) -> str:
-    ...
-```
+因此：
 
-装饰器在函数上存储 `__tool_spec__` 属性，`scan_module()` 遍历时自动识别并注册。
-
-**`_agent` 注入约定**：声明 `_agent` 关键字参数的工具 fn，在 `IdavollApp._bind_agent_tools()` 时被替换为 `functools.partial(fn, _agent=agent)`，使 LLM 调用时无需传递 Agent 引用。
-
----
-
-## 内置工具（`builtin/`）
-
-| 工具名 | 文件 | 说明 |
-|--------|------|------|
-| `memory_write` | `builtin/memory.py` | 向 MEMORY.md 或 USER.md 写入一条事实 |
-| `memory_search` | `builtin/memory.py` | 关键词检索当前记忆 |
-| `skill_get` | `builtin/skills.py` | 读取指定技能的完整 SKILL.md 内容 |
-| `skill_patch` | `builtin/skills.py` | 更新指定技能的描述或正文 |
-
-这四个工具在 `IdavollApp` 初始化时自动注册，并分别归属 `memory`、`skills` 两个内置工具集，合并为 `builtin` 工具集。
+- Prompt 关注“当前 agent 声明有哪些工具”
+- Runtime 关注“本轮执行时这些工具拿到了哪些注入上下文”
 
 ---
 
 ## 设计原则
 
-- **工具集是 Agent 能力边界**：AgentProfile 通过 `enabled_toolsets` 声明能力范围，产品层的成长系统通过 `unlock_toolset()` 渐进开放
-- **工具与 Agent 解耦**：ToolRegistry 是全局的，同一 ToolSpec 可被多个 Agent 共享；`_agent` 注入在运行时按 Agent 绑定，不污染全局状态
-- **`fn=None` 工具支持纯引导**：允许在 Prompt 中描述工具而不提供实现，适用于产品层自己处理工具调用结果的场景
+- 工具声明与执行上下文分离
+- Agent 级能力和 Session 级能力分别注入
+- Toolset 只表达权限与可见性，不表达 runtime 状态
+- Tool loop 仍然是普通 LLM 回合的一部分，不单独引入新的调度器

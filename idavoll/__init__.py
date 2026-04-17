@@ -1,4 +1,4 @@
-from .agent.workspace import ProfileWorkspace, ProfileWorkspaceManager
+from .agent.profile import ProfilePath, ProfileManager
 from .app import IdavollApp, SessionManager
 from .config import (
     CompressionConfig,
@@ -19,8 +19,8 @@ __all__ = [
     "LLMConfig",
     "MemoryManager",
     "MemoryProvider",
-    "ProfileWorkspace",
-    "ProfileWorkspaceManager",
+    "ProfilePath",
+    "ProfileManager",
     "PromptCompiler",
     "SessionConfig",
     "SessionManager",

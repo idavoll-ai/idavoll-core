@@ -75,7 +75,9 @@ async def reflect(
         if not insight:
             continue
         try:
-            if _agent.memory.write_fact(insight, target="memory"):
+            if _agent.memory_store is not None and _agent.memory_store.add_fact(insight, "memory"):
+                if _agent.memory is not None:
+                    _agent.memory.on_memory_write("add", "memory", insight)
                 written.append(insight)
             else:
                 skipped.append(insight)

@@ -1,11 +1,11 @@
 """Session Search — cross-session experience recall interface.
 
 The file-based implementation has been replaced by ``SQLiteSessionSearch``
-in the Vingolf persistence layer.  This module retains only the abstract
-interface so that ``agent.session_search`` is typed consistently regardless
-of the backing store.
+in the Vingolf persistence layer.  This module retains only the no-op
+interface so that session-scoped service resolvers can return a consistent
+object regardless of the backing store.
 
-Anything assigned to ``agent.session_search`` must implement::
+Any session search implementation must expose::
 
     async def search(self, query: str, context: str = "") -> str: ...
 """

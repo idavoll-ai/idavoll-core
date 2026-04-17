@@ -137,13 +137,13 @@ async def bootstrap_chat(body: BootstrapChatRequest) -> BootstrapChatResponse:
 async def refine_soul_text(body: RefineSoulTextRequest) -> SoulPreviewOut:
     """无状态 SOUL.md 调整 — 不需要已有 Agent，预览阶段专用。"""
     from idavoll.agent.profile import AgentProfile
-    from idavoll.agent.workspace import ProfileWorkspaceManager
+    from idavoll.agent.profile import ProfileManager
     app = state.get_app()
     soul_spec = await app._app.refine_soul_stateless(
         body.name, body.current_soul, body.feedback
     )
     tmp_profile = AgentProfile(name=body.name)
-    rendered = ProfileWorkspaceManager.render_soul(tmp_profile, soul_spec)
+    rendered = ProfileManager.render_soul(tmp_profile, soul_spec)
     return SoulPreviewOut(soul=rendered)
 
 

@@ -92,7 +92,7 @@ async def test_soul_md_is_the_persona_source_of_truth(fake_llm, tmp_path) -> Non
     assert not hasattr(agent.profile, "voice")
 
     assert agent.workspace is not None
-    agent.workspace.write_soul("# Custom Soul\n\nYou always speak like a formal reviewer.")
+    agent.workspace.soul_path.write_text("# Custom Soul\n\nYou always speak like a formal reviewer.", encoding="utf-8")
 
     frozen = app.prompt_compiler.compile_system(agent)
 
@@ -109,8 +109,8 @@ async def test_generated_soul_md_can_be_parsed(fake_llm, tmp_path) -> None:
     agent = await app.create_agent("Diana", "A patient distributed systems engineer")
 
     assert agent.workspace is not None
-    soul = agent.workspace.read_soul()
-    parsed = agent.workspace.read_soul_spec()
+    soul = agent.workspace.soul_path.read_text(encoding="utf-8")
+    parsed = parse_soul_markdown(soul)
 
     assert "## Identity" in soul
     assert parsed.identity.role
@@ -209,7 +209,7 @@ quirks:
     )
 
     assert agent.workspace is not None
-    parsed = agent.workspace.read_soul_spec()
+    parsed = parse_soul_markdown(agent.workspace.soul_path.read_text(encoding="utf-8"))
     frozen = app.prompt_compiler.compile_system(agent)
 
     assert parsed.identity.role == "一个陪用户推进艰难项目的 AI 合伙人"

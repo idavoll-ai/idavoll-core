@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 
-from ..agent.profile import SoulParseError, compile_soul_prompt
+from ..agent.profile import SoulParseError, compile_soul_prompt, parse_soul_markdown
 from ..agent.registry import Agent
 from ..session.session import Session
 
@@ -20,14 +20,14 @@ class PromptBuilder:
         current_message: str | None = None,
     ) -> list[BaseMessage]:
         profile = agent.profile
-        if agent.workspace is not None:
-            soul = agent.workspace.read_soul().strip()
+        if agent.workspace is not None and agent.workspace.soul_path.exists():
+            soul = agent.workspace.soul_path.read_text(encoding="utf-8").strip()
         else:
             soul = ""
 
         if soul:
             try:
-                soul_spec = agent.workspace.read_soul_spec() if agent.workspace is not None else None
+                soul_spec = parse_soul_markdown(soul)
             except SoulParseError:
                 soul_spec = None
 

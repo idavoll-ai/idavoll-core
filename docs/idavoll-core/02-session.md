@@ -1,133 +1,222 @@
-# Session 模块
+# Session
 
 ## 概述
 
-`idavoll/session/` 管理单次交互的生命周期：消息存储、上下文估算、历史压缩、跨 Session 经验检索。
+`idavoll/session/` 现在承载三类内容：
+
+- 当前会话数据结构
+- 上下文预算与压缩
+- 会话级服务容器
+
+它不再把跨历史 session 检索能力直接挂在 `Agent` 上，而是通过 `Session.services` 做按会话解析。
 
 ---
 
-## 核心数据结构（`session.py`）
+## 核心数据结构
 
-### Message
+### `Message`
 
-会话中的单条消息：
+`Message` 存在于 `session.py`，字段包括：
+
+- `agent_id`
+- `agent_name`
+- `content`
+- `role`
+- `id`
+- `created_at`
+- `metadata`
+
+它表示 session 历史里的单条消息，不区分 LangChain message 类型。
+
+### `Session`
+
+当前 `Session` 字段：
+
+- `id`
+- `participants`
+- `metadata`
+- `max_context_messages`
+- `messages`
+- `state`
+- `services`
+- `frozen_prompts`
+
+其中最重要的两个新增边界是：
+
+- `services`：会话级服务容器
+- `frozen_prompts`：按 `agent_id` 缓存 frozen system prompt
+
+### `SessionState`
+
+枚举值：
+
+- `open`
+- `active`
+- `closed`
+
+Core 目前主要使用 `open / closed`，`active` 为产品层扩展预留。
+
+---
+
+## `SessionServices`
+
+`SessionServices` 定义在 `context.py`。
+
+当前内置能力只有一项：
+
+- `session_search_factory`
+
+通过：
 
 ```python
-@dataclass
-class Message:
-    agent_id: str
-    agent_name: str
-    content: str
-    role: Literal["user", "assistant"]
-    id: str           # UUID
-    created_at: datetime
-    metadata: dict
+session.services.session_search_for(agent.id)
 ```
 
-### Session
+来解析某个 agent 在这个 session 中可用的跨历史 session 检索能力。
 
-会话对象，是核心运行时与产品模块共享的交互空间：
+这层设计的意义：
+
+- 不把会话能力挂在 `Agent` 顶层
+- 不把产品层基础设施直接塞进 `Session`
+- 多 agent session 下仍然可以按 `agent.id` 精确解析
+
+---
+
+## Frozen Prompt
+
+`Session.frozen_prompts` 是当前 prompt 系统的关键约束。
+
+规则：
+
+- 只在某个 agent 首次参与该 session 时编译一次
+- 缓存在 `frozen_prompts[agent.id]`
+- 会话中途不重新编译
+- 上下文压缩也不会修改它
+
+这样做有两个目的：
+
+- 保持 persona / frozen memory snapshot 稳定
+- 避免对话越长，system prompt 也跟着漂移
+
+---
+
+## 上下文估算
+
+`context.py` 目前只有一个粗略估算器：
 
 ```python
-class Session:
-    id: str                          # UUID
-    participants: list[Agent]        # 参与者列表
-    messages: list[Message]          # 完整消息历史
-    state: SessionState              # OPEN / ACTIVE / CLOSED
-    frozen_prompts: dict[str, str]   # agent_id → 冻结的 System Prompt
-    max_context_messages: int        # 滑动窗口大小（默认 20）
+estimate_tokens(text) -> int
 ```
 
-### 冻结 Prompt 原则（§9.2 Frozen Snapshot）
+实现很简单：
 
-`frozen_prompts` 在 Session 内每个 Agent 的**第一轮**被懒加载编译，之后整个 Session 生命周期内不再重编译。这确保了 Agent 在同一场对话中行为的一致性，即使 SOUL.md 或 MEMORY.md 在会话期间被修改也不会影响当前对话。
+- 空字符串返回 0
+- 否则按 `len(text) // 4` 粗估 token
+
+这个估算同时被：
+
+- `ContextCompressor`
+- `BuiltinMemoryProvider`
+- `SQLiteSessionSearch`
+
+用作 budget 控制。
 
 ---
 
-## 上下文估算（`context.py`）
+## `ContextCompressor`
 
-`estimate_tokens(text) -> int` 提供快速 token 估算（`len(text) // 4`），用于压缩触发判断和记忆 prefetch 预算控制，不需要精确值。
+`compressor.py` 提供 `ContextCompressor`。
 
----
+主入口：
 
-## 上下文压缩（`compressor.py`）
+- `maybe_compress(agent, session)`
+- `compress(agent, session)`
 
-`ContextCompressor` 在会话历史超出配置阈值时自动压缩，避免超出 LLM 上下文窗口。
+压缩算法：
 
-### 算法
+1. 保留头部 `head_keep`
+2. 保留尾部 `tail_keep`
+3. 中间消息作为 `middle`
+4. 触发 `on_pre_compress`
+5. 调用 LLM 把 `middle` 总结成一条 summary message
+6. 用 `head + [summary] + tail` 替换原历史
 
-```
-当 session.messages 估算 token 数超过 token_threshold 时：
+不会被修改的内容：
 
-1. 切分：
-   - head  = 前 head_keep 条消息（上下文锚点，始终保留）
-   - tail  = 后 tail_keep 条消息（近期上下文，始终保留）
-   - middle = 其余消息（压缩候选）
+- `session.frozen_prompts`
 
-2. 触发 on_pre_compress 钩子，让插件在消息消失前提取持久事实
-
-3. 调用 LLM 将 middle 压缩为一段 ≤200 字的结构化摘要
-
-4. 用 [summary_msg] 替换 middle，最终：
-   session.messages = head + [summary_msg] + tail
-```
-
-### 配置（CompressionConfig）
-
-| 参数 | 说明 |
-|------|------|
-| `enabled` | 是否启用压缩 |
-| `token_threshold` | 触发压缩的 token 上限 |
-| `min_messages` | 触发压缩所需的最少消息数 |
-| `head_keep` | 保留的头部消息数 |
-| `tail_keep` | 保留的尾部消息数 |
-
-冻结的 `frozen_prompts` 不参与压缩，只有 `session.messages` 被修改。
+这意味着压缩只影响动态历史，不影响静态 system prompt。
 
 ---
 
-## 跨 Session 检索（`search.py` + `vingolf/persistence/session_repo.py`）
+## 压缩前记忆补写
 
-`agent.session_search` 接口统一为一个鸭子类型：只需实现 `async def search(query, context) -> str`。
+Core 在 `IdavollApp` 启动时注册了一个内置 hook：
 
-### Core 层：no-op 存根
+- `on_pre_compress -> flush_memories()`
 
-`idavoll/session/search.py` 的 `SessionSearch` 是一个空实现，当产品层未配置存储时使用，`search()` 始终返回空字符串。
+`flush_memories()` 会：
 
-### Vingolf 层：`SQLiteSessionSearch`
+1. 读取 frozen prompt 与近期对话
+2. 加一个提醒 prompt
+3. 只暴露 `memory` 工具
+4. 给模型一次“压缩前补写长期记忆”的机会
 
-`vingolf/persistence/session_repo.py` 提供完整实现，在 `VingolfApp.startup()` 时通过 `_attach_session_search()` 替换掉每个 Agent 上的 no-op 存根。
-
-**数据来源：** `VingolfApp` 监听 `on_session_end` 和 `topic.closed` 事件，将原始对话写入 `session_records` 表（`SessionRecordRepository.save()`）。
-
-**搜索策略（无向量嵌入）：**
-
-1. 过滤出该 Agent 参与过的 session 记录
-2. 对 query + context 分词，按关键词命中数打分
-3. 对 top-N 命中记录调用 LLM 生成摘要（LLM 失败时降级为文本摘录）
-4. 合并结果为 `<session-context>` 块，受 `token_budget` 约束
-
-### 返回格式
-
-```xml
-<session-context>
-[Session a1b2c3d4]
-- 关键要点 1
-- 关键要点 2
+这一步是为了避免上下文被压缩后，尚未写入 MEMORY.md 的长期事实丢失。
 
 ---
 
-[Session b5c6d7e8]
-- 关键要点 3
-</session-context>
+## 跨历史 Session 检索
+
+`idavoll/session/search.py` 只保留了接口级 no-op：
+
+```python
+class SessionSearch:
+    async def search(self, query: str, context: str = "") -> str:
+        return ""
 ```
 
-该块由 `IdavollApp.generate_response` 自动附加到 `memory_context`，调用方无需手动处理。
+真正的实现现在在产品层。
+
+### Vingolf 的接法
+
+Vingolf 在 `on_session_start` 中给 `Session.services` 装 `session_search_factory`。
+
+factory 会按 `agent_id` 懒创建：
+
+- `SQLiteSessionSearch(repo, agent_id, llm=...)`
+
+然后 Core 在 `generate_response()` / `generate_response_stream()` 里调用：
+
+```python
+search = session.services.session_search_for(agent.id)
+session_ctx = await search.search(current_message, scene_context)
+```
+
+拿到的结果会并进本轮 `memory_context`。
+
+---
+
+## Session 与产品层的边界
+
+Session 负责：
+
+- 当前会话消息
+- 当前会话状态
+- 会话级服务解析
+- frozen prompt 缓存
+
+产品层负责：
+
+- 原始 transcript 持久化
+- 跨 session 检索实现
+- topic / review / leveling 等业务上下文
 
 ---
 
 ## 设计原则
 
-- **Session 是临时的**：Session 结束后，持久化价值一部分提取到 MEMORY.md，另一部分以原始对话形式写入 SQLite `session_records`
-- **压缩保留边界**：head/tail 策略确保对话的起点和最近上下文始终可见
-- **跨 Session 召回与持久记忆正交**：SessionSearch 不替代 MEMORY.md，二者由不同路径写入，服务不同的召回场景
+- `Session` 表示“当前会话”，不直接承载产品层基础设施对象
+- 会话级能力通过 `services` 进入运行时
+- 压缩只动动态历史，不动 frozen prompt
+- 跨历史 session 检索是 session-scoped service，不是 `Agent` 字段

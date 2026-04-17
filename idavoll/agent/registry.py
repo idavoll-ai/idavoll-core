@@ -7,10 +7,10 @@ from .profile import AgentProfile
 
 if TYPE_CHECKING:
     from ..memory.manager import MemoryManager
-    from ..session.search import SessionSearch
+    from ..memory.store import MemoryStore
     from ..skills.library import SkillsLibrary
     from ..tools.registry import ToolSpec, ToolsetManager
-    from .workspace import ProfileWorkspace
+    from .profile import ProfilePath
 
 
 class AgentLoader(Protocol):
@@ -31,10 +31,10 @@ class Agent:
 
     profile: AgentProfile
     metadata: dict[str, Any] = field(default_factory=dict)
-    workspace: "ProfileWorkspace | None" = field(default=None, compare=False)
+    workspace: "ProfilePath | None" = field(default=None, compare=False)
+    memory_store: "MemoryStore | None" = field(default=None, compare=False)
     memory: "MemoryManager | None" = field(default=None, compare=False)
     skills: "SkillsLibrary | None" = field(default=None, compare=False)
-    session_search: "SessionSearch | None" = field(default=None, compare=False)
     tools: "list[ToolSpec]" = field(default_factory=list, compare=False)
 
     @property

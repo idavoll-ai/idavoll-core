@@ -1,111 +1,143 @@
-# Plugin 模块
+# Hooks 与 Plugins
 
 ## 概述
 
-`idavoll/plugin/` 提供插件系统，允许产品层在不修改框架核心代码的情况下注入行为。由两个简单机制组成：插件基类（`IdavollPlugin`）和异步事件总线（`HookBus`）。
+Core 当前的扩展机制由两部分构成：
+
+- `IdavollPlugin`
+- `HookBus`
+
+它们的作用不是“替代继承”，而是让产品层以事件驱动方式挂接：
+
+- 持久化
+- topic / review / leveling
+- session 级服务安装
+- 经验固化
 
 ---
 
-## 插件基类（`base.py`）
+## `IdavollPlugin`
+
+`idavoll/hook/base.py` 中的 `IdavollPlugin` 很薄：
 
 ```python
 class IdavollPlugin:
     name = "plugin"
-
-    def install(self, app: IdavollApp) -> None:
+    def install(self, app) -> None:
         ...
 ```
 
-产品层继承 `IdavollPlugin` 并实现 `install(app)`，在其中：
+插件约定在 `install(app)` 中完成：
 
-- 向 `app.hooks` 注册事件监听器
-- 向 `app.tool_registry` 注册自定义工具
-- 向 `app.toolsets` 定义新的工具集
-- 调用 `app.set_agent_loader()` 注册持久化适配器
+- 注册 hook handler
+- 保存 app 引用
+- 接入产品层服务
 
-通过 `app.use(plugin)` 安装插件：
+安装入口：
 
 ```python
-app = IdavollApp(llm=model)
-app.use(VingolfPlugin())
-app.use(LangSmithPlugin(api_key="..."))
+app.use(plugin)
 ```
 
 ---
 
-## 事件总线（`hooks.py`）
+## `HookBus`
 
-`HookBus` 是一个轻量异步事件总线，支持同步和异步处理器。
+`idavoll/hook/hooks.py` 提供一个极简异步事件总线。
 
-### 注册处理器
+方法：
+
+- `on(event, handler)`
+- `hook(event)` 装饰器
+- `emit(event, **ctx)`
+
+特点：
+
+- handler 可以是 sync 或 async
+- `emit()` 会用 `asyncio.gather()` 并发执行同一事件下的所有 handler
+- 如果 handler 抛错，异常会向上传播给调用方
+
+也就是说，HookBus 当前不是“吞错总线”，而是“并发执行的透明扩展点”。
+
+---
+
+## Core 内置事件
+
+当前 Core 主动发出的事件包括：
+
+- `agent.created`
+- `agent.loaded`
+- `on_session_start`
+- `on_session_end`
+- `pre_llm_call`
+- `post_llm_call`
+- `pre_tool_call`
+- `post_tool_call`
+- `on_pre_compress`
+- `soul.refined`
+- `subagent.completed`
+- `subagent.failed`
+
+其中 `on_pre_compress` 目前由 Core 自己注册了一个内置 handler：
+
+- `flush_memories()`
+
+---
+
+## 产品层常见事件
+
+Vingolf 在 Core 之上继续扩展了很多业务事件，例如：
+
+- `topic.created`
+- `topic.closed`
+- `agent.level_up`
+- `review.completed`
+
+这些事件不是 Core 的一部分，但产品层依然复用同一套 `HookBus`。
+
+---
+
+## 当前推荐接法
+
+产品层通常这样接入：
 
 ```python
-# 方式 1：直接注册
-hooks.on("on_session_start", my_handler)
+@app.hooks.hook("on_session_start")
+async def _on_session_start(session, **_):
+    ...
 
-# 方式 2：装饰器
-@hooks.hook("on_memory_write")
-async def on_memory_write(agent, content, target):
+@app.hooks.hook("on_session_end")
+async def _on_session_end(session, **_):
     ...
 ```
 
-### 触发事件
+常见职责：
 
-```python
-await hooks.emit("on_session_start", session=session, participants=participants)
-```
-
-所有处理器并发执行（`asyncio.gather`），同步处理器自动适配为异步调用。
-
-### 框架内置事件
-
-| 事件名 | 触发时机 | 传入参数 |
-|--------|----------|---------|
-| `agent.created` | Agent 创建完成后 | `agent` |
-| `agent.loaded` | Agent 从存储加载后 | `agent` |
-| `on_session_start` | Session 创建时 | `session`, `participants` |
-| `on_session_end` | Session 关闭时 | `session` |
-| `pre_llm_call` | LLM 调用前 | `agent`, `session`, `scene_context`, `current_message` |
-| `post_llm_call` | LLM 调用后 | `agent`, `session`, `content` |
-| `pre_tool_call` | 工具调用前 | `agent`, `session`, `tool_name`, `tool_args` |
-| `post_tool_call` | 工具调用后 | `agent`, `session`, `tool_name`, `tool_args`, `result` |
-| `on_pre_compress` | 会话历史压缩前 | `agent`, `session`, `messages` |
-| `on_memory_write` | 记忆事实写入后 | `agent`, `content`, `target` |
-| `soul.refined` | Soul 精炼完成后 | `agent`, `feedback` |
-| `agent.level_up` | Agent 升级时（Vingolf 产品层） | `agent`, `old_level`, `new_level` |
+- 在 `on_session_start` 给 `Session.services` 安装 factory
+- 在 `agent.created` 持久化 `AgentProfile`
+- 在 `on_session_end` 持久化 transcript
+- 在 review / topic 事件里调用 Core 的 `generate_response()`
 
 ---
 
-## 典型插件用法示例
+## Core 与产品层的边界
 
-```python
-class VingolfPlugin(IdavollPlugin):
-    name = "vingolf"
+HookBus 的存在意味着：
 
-    def __init__(self, db: Database):
-        self._db = db
+- Core 不直接依赖 SQLite / Topic / Review
+- 产品层也不需要 monkey patch `IdavollApp`
 
-    def install(self, app: IdavollApp) -> None:
-        repo = AgentProfileRepository(self._db)
+双方只通过：
 
-        # 注册 AgentLoader 让框架从数据库还原 Agent
-        app.set_agent_loader(repo.get)
+- 显式 API
+- 明确事件名
 
-        # 监听 Agent 创建事件，持久化到数据库
-        @app.hooks.hook("agent.created")
-        async def on_agent_created(agent):
-            await repo.save(agent.profile)
-
-        # 在记忆写入后触发等级 XP 增长
-        @app.hooks.hook("on_memory_write")
-        async def on_memory_write(agent, content, target):
-            await leveling_service.add_xp(agent.id, xp=5)
-```
+协作。
 
 ---
 
 ## 设计原则
 
-- **框架不依赖产品层**：核心框架对 Vingolf、LangSmith 等产品/观测层一无所知，所有扩展点通过事件和插件接口表达
-- **并发执行**：所有 Hook 处理器并发触发，避免某个慢速监听器阻塞主流程
-- **安装即注册**：插件的所有副作用都在 `install()` 中完成，`IdavollApp` 构建后状态是完整的
+- 插件只做扩展，不改写 Core 主流程
+- 事件名要稳定、语义明确
+- session / persistence / review 这类产品能力优先通过 hook 接入

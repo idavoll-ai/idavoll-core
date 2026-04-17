@@ -23,7 +23,7 @@ from .agent.profile import (
     parse_soul_markdown,
     refine_soul_spec,
 )
-from .agent.workspace import ProfileWorkspace, ProfileWorkspaceManager
+from .agent.profile import ProfilePath, ProfileManager
 
 logger = logging.getLogger(__name__)
 from .config import IdavollConfig
@@ -31,8 +31,8 @@ from .llm.adapter import LLMAdapter
 from .memory.builtin import BuiltinMemoryProvider
 from .memory.flush import flush_memories
 from .memory.manager import MemoryManager
+from .memory.store import MemoryStore
 from .session.compressor import ContextCompressor
-from .session.search import SessionSearch
 from .skills.library import SkillsLibrary
 from .hook.base import IdavollPlugin
 from .hook.hooks import HookBus
@@ -106,7 +106,7 @@ class IdavollApp:
             scanner=self.safety_scanner,
             toolsets=self.toolsets,
         )
-        self.workspaces = ProfileWorkspaceManager(self._config.workspace.base_dir)
+        self.workspaces = ProfileManager(self._config.workspace.base_dir)
         self.compressor = ContextCompressor(
             self.llm, self.hooks, self._config.compression
         )
@@ -182,14 +182,37 @@ class IdavollApp:
                 bound.append(spec)
         agent.tools = bound
 
+    @staticmethod
+    def _bind_turn_tools(
+        tools: list[ToolSpec], session: Session | None
+    ) -> list[ToolSpec]:
+        """Bind session-scoped tool injections for a single response turn."""
+        if session is None:
+            return tools
+        bound: list[ToolSpec] = []
+        for spec in tools:
+            if spec.fn is not None and "_session" in inspect.signature(spec.fn).parameters:
+                bound.append(
+                    dataclasses.replace(
+                        spec,
+                        fn=functools.partial(spec.fn, _session=session),
+                    )
+                )
+            else:
+                bound.append(spec)
+        return bound
+
     def unlock_toolset(self, agent: "Agent", toolset_name: str) -> "Agent":
         """Unlock a toolset for an agent and re-bind agent-scoped tool fns.
 
         Wraps ``AgentRegistry.unlock_toolset`` so that builtin tools (which
         declare ``_agent`` in their signature) are re-bound with the correct
-        agent reference after every tool resolution.
+        agent reference after every tool resolution.  Memory provider tools
+        are re-injected here so they survive the toolset re-resolve.
         """
         self.agents.unlock_toolset(agent.id, toolset_name)
+        if agent.memory:
+            agent.tools.extend(agent.memory.get_tool_specs())
         self._bind_agent_tools(agent)
         return agent
 
@@ -227,16 +250,23 @@ class IdavollApp:
         self._plugins.append(plugin)
         return self
 
-    def _attach_runtime(self, agent: Agent, workspace: ProfileWorkspace) -> None:
+    def _attach_runtime(self, agent: Agent, workspace: ProfilePath) -> None:
         """Attach workspace-backed services to a freshly registered agent."""
         agent.workspace = workspace
-        agent.memory = MemoryManager().add_provider(BuiltinMemoryProvider(workspace))
-        agent.skills = SkillsLibrary(workspace)
-        agent.session_search = SessionSearch()
+        store = MemoryStore(
+            memory_path=workspace.memory_path,
+            user_path=workspace.user_path,
+        )
+        store.load_snapshot()
+        agent.memory_store = store
+        agent.memory = MemoryManager().add_provider(BuiltinMemoryProvider(store))
+        agent.skills = SkillsLibrary(workspace.skills_path)
         agent.tools = self.toolsets.resolve(
             agent.profile.enabled_toolsets,
             disabled_tools=agent.profile.disabled_tools,
         )
+        if agent.memory:
+            agent.tools.extend(agent.memory.get_tool_specs())
         self._bind_agent_tools(agent)
 
     async def create_agent(self, name: str, description: str) -> Agent:
@@ -266,7 +296,7 @@ class IdavollApp:
         profile = AgentProfile(name=name, description=description.strip())
         workspace = self.workspaces.get_or_create(profile, soul)
         # Normalize the stored SOUL.md to the canonical project format.
-        workspace.write_soul_spec(profile, soul)
+        self.workspaces.write_soul_spec(profile.id, profile, soul)
         agent = self.agents.register(profile)
         self._attach_runtime(agent, workspace)
         await self.hooks.emit("agent.created", agent=agent)
@@ -339,8 +369,9 @@ class IdavollApp:
             )
 
         # Auto-append session context (cross-session experience recall).
-        if current_message and agent.session_search:
-            session_ctx = await agent.session_search.search(current_message, scene_context)
+        search = session.services.session_search_for(agent.id) if session is not None else None
+        if current_message and search is not None:
+            session_ctx = await search.search(current_message, scene_context)
             if session_ctx:
                 memory_context = (
                     (memory_context + "\n\n" + session_ctx)
@@ -371,7 +402,8 @@ class IdavollApp:
         # hits the safety cap), firing pre_tool_call / post_tool_call hooks on
         # each invocation.  Falls back to a plain generate() when no callable
         # tools are configured so the hot path is unchanged.
-        callable_tools = [t for t in agent.tools if t.fn is not None]
+        turn_tools = self._bind_turn_tools(agent.tools, session)
+        callable_tools = [t for t in turn_tools if t.fn is not None]
 
         if callable_tools:
             # Index by name so dispatch uses the agent-bound (partial) specs,
@@ -475,8 +507,9 @@ class IdavollApp:
                 current_message, scene_context
             )
 
-        if current_message and agent.session_search:
-            session_ctx = agent.session_search.search(current_message, scene_context)
+        search = session.services.session_search_for(agent.id) if session is not None else None
+        if current_message and search is not None:
+            session_ctx = await search.search(current_message, scene_context)
             if session_ctx:
                 memory_context = (
                     (memory_context + "\n\n" + session_ctx)
@@ -502,7 +535,8 @@ class IdavollApp:
         )
 
         # 5. Tool loop or direct streaming.
-        callable_tools = [t for t in agent.tools if t.fn is not None]
+        turn_tools = self._bind_turn_tools(agent.tools, session)
+        callable_tools = [t for t in turn_tools if t.fn is not None]
         content = ""
 
         try:
@@ -576,7 +610,7 @@ class IdavollApp:
         """
         if agent.workspace is None:
             return ""
-        return agent.workspace.read_soul()
+        return self.workspaces.read_soul(agent.profile.id)
 
     async def refine_soul(self, agent: Agent, feedback: str) -> str:
         """Refine the agent's SOUL.md based on user feedback and return the updated text.
@@ -596,10 +630,10 @@ class IdavollApp:
             raise ValueError(
                 f"Agent {agent.name!r} has no workspace; call create_agent() first."
             )
-        current_text = agent.workspace.read_soul()
+        current_text = self.workspaces.read_soul(agent.profile.id)
         updated_soul = await refine_soul_spec(self.llm, agent.name, current_text, feedback)
-        rendered = ProfileWorkspaceManager.render_soul(agent.profile, updated_soul)
-        agent.workspace.write_soul(rendered)
+        rendered = ProfileManager.render_soul(agent.profile, updated_soul)
+        self.workspaces.write_soul(agent.profile.id, rendered)
         await self.hooks.emit("soul.refined", agent=agent, feedback=feedback)
         return rendered
 

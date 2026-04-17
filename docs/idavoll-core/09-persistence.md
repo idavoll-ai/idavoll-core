@@ -1,118 +1,180 @@
-# Persistence 模块
+# Persistence
 
 ## 概述
 
-`vingolf/persistence/` 是 Vingolf 产品层的持久化实现，负责 AgentProfile、话题、帖子、进度数据和原始 Session 对话的数据库存取。Core 层对数据库一无所知，持久化能力通过 `AgentLoader` 协议和 HookBus 事件注入。
+Idavoll Core 当前只保留最小持久化边界：
+
+- `AgentLoader`
+- 工作空间文件系统
+- session start / end hooks
+
+真正的数据库持久化实现集中在 `vingolf/persistence/`。
+
+因此这个模块应理解为：
+
+- Core 的持久化接口约束
+- Vingolf 的参考实现
 
 ---
 
-## 数据库连接（`database.py`）
+## Core 侧边界
 
-`Database` 是基于 `aiosqlite` 的异步 SQLite 连接管理器：
+### 工作空间
+
+Core 自带的文件系统持久化只有 Agent workspace：
+
+- `SOUL.md`
+- `MEMORY.md`
+- `USER.md`
+- `skills/`
+
+相关类型都在 `idavoll/agent/profile.py`：
+
+- `ProfilePath`
+- `ProfileManager`
+
+### `AgentLoader`
+
+数据库恢复 `AgentProfile` 的能力通过 `AgentLoader` 协议注入：
 
 ```python
-db = Database("vingolf.db")
-await db.init()                    # 建连并建表
-await db.conn.execute("SELECT ...") # 直接使用 .conn 属性
-await db.close()
-
-# 或作为异步上下文管理器
-async with Database("vingolf.db") as db:
-    ...
+class AgentLoader(Protocol):
+    async def __call__(self, agent_id: str) -> AgentProfile | None: ...
 ```
 
-### 初始化行为
+产品层通过：
 
-`init()` 时自动执行：
+```python
+app.set_agent_loader(loader)
+```
 
-- `PRAGMA journal_mode=WAL` — 提升并发写性能
-- `PRAGMA foreign_keys=ON` — 强制外键约束
-- 创建全部表（若不存在）
+接到 Core。
 
-### 表结构
+### Session 持久化
 
-所有表定义在单一 `_SCHEMA` 中：
+Core 自己不会把 session 落库。  
+它只在 `close_session()` 时发出：
 
-| 表名 | 说明 |
-|------|------|
-| `agents` | AgentProfile 持久化，含上下文预算和工具集配置 |
-| `topics` | 话题（Session 的产品化形态） |
-| `topic_memberships` | Agent 在话题中的参与记录和统计 |
-| `posts` | Agent 在话题中的发帖 |
-| `agent_progress` | Agent 等级和 XP 数据 |
-| `session_records` | 关闭 Session 的原始对话文本（供跨 Session 检索用） |
+- `on_session_end`
+
+产品层在这个节点负责持久化 transcript。
 
 ---
 
-## 仓库层
+## `Database`
 
-### Agent 仓库（`agent_repo.py`）
+`vingolf/persistence/database.py` 提供异步 SQLite 连接管理。
 
-`AgentProfileRepository` 提供 AgentProfile 的异步 CRUD：
+启动时会：
 
-```python
-repo = AgentProfileRepository(db)
+- 创建连接
+- 开启 WAL
+- 开启 foreign keys
+- 执行 schema
+- 自动补齐新增列
 
-await repo.save(profile)              # INSERT OR REPLACE
-profile = await repo.get(agent_id)    # → AgentProfile | None
-profiles = await repo.all()           # 按创建时间排序
-await repo.delete(agent_id)
-```
+当前 schema 覆盖：
 
-`enabled_toolsets` 和 `disabled_tools` 以 JSON 字符串存储，`ContextBudget` 的四个字段分列存储。
-
-### Session 记录仓库（`session_repo.py`）
-
-`SessionRecordRepository` 存储关闭 Session 的原始对话，供跨 Session 检索使用：
-
-```python
-repo = SessionRecordRepository(db)
-
-await repo.save(session_id, participants="id1,id2", conversation="...")
-records = await repo.list_recent(limit=50)
-records = await repo.list_by_agent(agent_id)
-await repo.delete(session_id)
-```
-
-`conversation` 字段存储格式化后的纯文本对话（`[role] name: content`）。
-
-### `SQLiteSessionSearch`
-
-`session_repo.py` 中同文件提供的跨 Session 检索实现，绑定到特定 `agent_id`：
-
-```python
-search = SQLiteSessionSearch(repo, agent_id=agent.id, llm=llm_adapter)
-result = await search.search("query", context="补充上下文")
-```
-
-检索策略：关键词打分 → top-N → LLM 摘要（失败时降级为文本摘录） → `<session-context>` 块。
+- `agents`
+- `topics`
+- `topic_memberships`
+- `posts`
+- `agent_progress`
+- `session_records`
+- `reviews`
+- `review_strategy_results`
+- `review_growth_directives`
 
 ---
 
-## VingolfApp 的集成方式
+## Repository 层
 
-持久化模块通过 `VingolfApp.startup()` 统一装配，不直接修改 Core：
+### `AgentProfileRepository`
 
-```python
-app = VingolfApp.from_yaml("config.yaml")
-await app.startup()   # 建表、注入 AgentLoader、注册 hooks、恢复状态
-# ... 处理请求 ...
-await app.shutdown()  # 关闭数据库连接
-```
+负责 `AgentProfile` 的 CRUD。
 
-`startup()` 内部完成的关键操作：
+主要映射字段：
 
-1. 初始化 `Database` 并建表
-2. 向 `IdavollApp` 注入 `AgentLoader`（`repo.get`）
-3. 注册 `agent.created` 钩子 → 持久化新 Agent
-4. 注册 `agent.loaded` 钩子 → 为恢复的 Agent 附加 `SQLiteSessionSearch`
-5. 注册 `on_session_end` / `topic.closed` 钩子 → 持久化原始对话到 `session_records`
-6. 将所有已知 Agent 恢复到内存注册表
+- `id / name / description`
+- `budget_*`
+- `enabled_toolsets`
+- `disabled_tools`
+
+### `SessionRecordRepository`
+
+负责原始 transcript 的落库与读取。
+
+当前策略很直接：
+
+- 一个 closed session 对应一条 `session_records`
+- 保存完整原始对话文本
+- 不预生成摘要
+
+这也是当前检索系统“先落原文，再按需总结”的基础。
+
+### 其它仓库
+
+Vingolf 还额外提供：
+
+- `TopicRepository`
+- `AgentProgressRepository`
+- `ReviewRepository`
+
+这些都属于产品层业务，不会回流进 Core。
+
+---
+
+## `SQLiteSessionSearch`
+
+`vingolf/persistence/session_repo.py` 中的 `SQLiteSessionSearch` 是当前跨历史 session 召回的产品层实现。
+
+输入：
+
+- `SessionRecordRepository`
+- `agent_id`
+- 可选 `LLMAdapter`
+
+工作流程：
+
+1. 从 `session_records` 里筛出该 agent 参与过的记录
+2. 对 `query + context` 分词
+3. 用关键词命中数打分
+4. 取 top-N
+5. 对命中记录做摘要
+6. 输出 `<session-context>` 风格的块
+
+如果 LLM 摘要失败，会退回文本摘录。
+
+---
+
+## Vingolf 的集成方式
+
+`VingolfApp.startup()` 当前做了这些持久化接线：
+
+1. 初始化 `Database`
+2. 创建各类 repository
+3. `set_agent_loader(self._agent_repo.get)`
+4. 在 `agent.created` 时保存 profile
+5. 在 `on_session_start` 时给 `session.services` 安装 `session_search_factory`
+6. 在 `on_session_end` / `topic.closed` 时保存原始 transcript
+7. 启动时恢复所有已知 agent
+
+也就是说，`SQLiteSessionSearch` 不再挂在 `Agent` 上，而是 session 启动时装进 `Session.services`。
+
+---
+
+## 当前持久化策略总结
+
+当前架构已经比较稳定：
+
+- 人格、记忆、技能：workspace 文件系统
+- Agent profile / topic / review / progress / raw transcript：SQLite
+- 跨 session 检索：从 SQLite 原文按需生成总结
 
 ---
 
 ## 设计原则
 
-- **WAL 模式**：异步并发写场景下 WAL 比默认 journal mode 性能更好
-- **ProfileWorkspace 与数据库互补**：AgentProfile 结构化元数据存数据库；可变内容（SOUL.md、MEMORY.md、skills/）存文件系统；原始对话存 `session_records`
-- **Core 不依赖数据库**：框架核心通过 `AgentLoader` 协议和 HookBus 与持久化层解耦，可替换为 PostgreSQL、Redis 等任意后端
+- Core 只定义边界，不绑定数据库
+- 原始 transcript 优先落库，摘要按需生成
+- 会话级服务在 session 启动时安装，而不是提前绑定到 Agent

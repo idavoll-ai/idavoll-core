@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 
-from ..agent.profile import SoulParseError, compile_soul_prompt
+from ..agent.profile import SoulParseError, compile_soul_prompt, parse_soul_markdown
 from ..safety.scanner import SafetyScanner
 
 if TYPE_CHECKING:
@@ -157,12 +157,12 @@ class PromptCompiler:
         system block built only from control-plane metadata.
         """
         if agent.workspace is not None:
-            soul = agent.workspace.read_soul().strip()
+            soul = agent.workspace.soul_path.read_text(encoding="utf-8").strip() if agent.workspace.soul_path.exists() else ""
             if soul:
                 if scanner is not None:
                     scanner.scan(soul, source="SOUL.md")
                 try:
-                    soul_spec = agent.workspace.read_soul_spec()
+                    soul_spec = parse_soul_markdown(soul)
                 except SoulParseError:
                     # Keep legacy hand-written SOUL.md usable while the repo
                     # migrates to the structured markdown shape.
@@ -197,10 +197,13 @@ class PromptCompiler:
                 scanner.scan(index, source="Skills Index")
             return index
 
-        # Fallback: bare name list from workspace
+        # Fallback: bare name list from the skills directory on disk
         if agent.workspace is None:
             return ""
-        names = agent.workspace.list_skill_names()
+        skills_path = agent.workspace.skills_path
+        if not skills_path.exists():
+            return ""
+        names = sorted(p.parent.name for p in skills_path.glob("*/SKILL.md"))
         if not names:
             return ""
         index = "\n".join(f"- {name}" for name in names)

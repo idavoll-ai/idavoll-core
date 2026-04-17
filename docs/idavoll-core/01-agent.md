@@ -1,143 +1,177 @@
-# Agent 模块
+# Agent
 
 ## 概述
 
-`idavoll/agent/` 是框架的控制平面，负责 Agent 的数据建模、人格定义、运行时注册和工作空间管理。它不参与每轮对话，只在 Agent 创建和加载时运行。
+`idavoll/agent/profile.py` 和 `idavoll/agent/registry.py` 共同定义了 Agent 的两层结构：
+
+- `AgentProfile`：可持久化的控制平面元数据
+- `Agent`：运行时对象，聚合 workspace、memory、skills、tools 等能力
+
+人格本身不存进 `AgentProfile`。  
+SOUL.md 才是 prompt-facing persona 的唯一事实来源。
 
 ---
 
-## 数据模型（`profile.py`）
+## `AgentProfile`
 
-### AgentProfile
+`AgentProfile` 是产品层可落库的轻量模型。
 
-Agent 的运行时元数据，存储于数据库，不包含任何人格描述（人格单独存于 SOUL.md）。
+核心字段：
 
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `id` | `str` (UUID) | 全局唯一标识 |
-| `name` | `str` | Agent 名称 |
-| `description` | `str` | 管理侧摘要，不注入 Prompt |
-| `budget` | `ContextBudget` | Token 预算配置 |
-| `enabled_toolsets` | `list[str]` | 已激活的工具集名称列表 |
-| `disabled_tools` | `list[str]` | 从已激活工具集中排除的具体工具 |
+| 字段 | 说明 |
+|---|---|
+| `id` | Agent 全局唯一 ID |
+| `name` | 展示名 |
+| `description` | 管理侧摘要，不是人格真相 |
+| `budget` | `ContextBudget`，控制上下文预算 |
+| `enabled_toolsets` | 已启用工具集 |
+| `disabled_tools` | 细粒度禁用的工具名 |
 
-### ContextBudget
+`ContextBudget` 当前包含：
 
-控制 Agent 的上下文窗口分配：
+- `total`
+- `reserved_for_output`
+- `memory_context_max`
+- `scene_context_max`
 
-```python
-total              = 4096   # 总 token 上限
-reserved_for_output = 512   # 为模型输出预留
-memory_context_max = 400    # 记忆块最大 token
-scene_context_max  = 300    # 场景上下文最大 token
-```
-
-### SoulSpec / IdentityConfig / VoiceConfig
-
-`SoulSpec` 是 SOUL.md 的结构化表示：
-
-- **IdentityConfig**：`role`、`backstory`、`goal`
-- **VoiceConfig**：`tone`、`language`、`quirks`、`example_messages`
-
-### SOUL.md 解析
-
-`parse_soul_markdown(text) -> SoulSpec` 支持两种格式：
-
-- **规范格式**：`## Identity / ## Voice / ## Examples` 下的 `- **Key**: Value` bullet 列表
-- **Bootstrap 格式**：`# Identity / # Voice` 下的 `key: value` 键值对
-
-解析器对格式宽容，用户手工编辑的 SOUL.md 不需要精确符合机器生成的格式。
-
-`compile_soul_prompt(name, soul) -> str` 将 SoulSpec 编译为注入 System Prompt 的人格块。
+`available` 属性等于 `total - reserved_for_output`。
 
 ---
 
-## 人格创建服务（`profile_service.py`）
+## Soul 模型
 
-`AgentProfileService` 将用户的自然语言描述结构化为 `(AgentProfile, SoulSpec)` 对，**仅在 Agent 创建时运行一次**。
+SOUL 的结构化表示也定义在 `profile.py`：
 
-### 三条路径
+- `IdentityConfig`
+- `VoiceConfig`
+- `ExampleMessage`
+- `SoulSpec`
 
-1. **compile(name, description)**：调用 LLM 提取结构化人格字段，失败时回退到启发式默认值（永不抛出异常）
-2. **bootstrap_chat(name, messages)**：驱动一轮多轮对话式人格设计，LLM 在信息充足时输出 `<SOUL>...</SOUL>` 块
-3. **refine(name, current_soul_text, feedback)**：基于用户反馈更新已有 SoulSpec，失败时保留原 SoulSpec
+关键函数：
 
-### 失败策略
+- `parse_soul_markdown(text) -> SoulSpec`
+- `compile_soul_prompt(name, soul, fallback_description=...) -> str`
+- `extract_soul(llm, name, description) -> SoulSpec`
+- `refine_soul_spec(llm, name, current_soul_text, feedback) -> SoulSpec`
 
-任何 LLM 调用失败，服务均回退到确定性默认值，Agent 创建流程不会因人格提取错误而中断。
+当前解析器支持：
 
----
+- 规范 `## Identity / ## Voice / ## Examples` 结构
+- bootstrap 阶段较宽松的 markdown 形态
 
-## 运行时注册表（`registry.py`）
-
-### Agent（dataclass）
-
-运行时 Agent 状态对象，聚合了所有服务引用：
-
-```python
-@dataclass
-class Agent:
-    profile: AgentProfile
-    metadata: dict
-    workspace: ProfileWorkspace | None
-    memory: MemoryManager | None
-    skills: SkillsLibrary | None
-    session_search: SessionSearch | None
-    tools: list[ToolSpec]
-```
-
-### AgentRegistry
-
-内存中的控制平面，按 `agent_id` 存储 `Agent` 实例：
-
-- `register(profile)` → 创建并存储 Agent
-- `get(agent_id)` / `get_or_raise(agent_id)` → 查询
-- `unlock_toolset(agent_id, toolset_name)` → 激活工具集并重新解析 `agent.tools`
-
-### AgentLoader（Protocol）
-
-产品层实现的协议，用于从外部存储（数据库）还原 AgentProfile：
-
-```python
-class AgentLoader(Protocol):
-    async def __call__(self, agent_id: str) -> AgentProfile | None: ...
-```
-
-由产品层（如 Vingolf）在 `install()` 时通过 `app.set_agent_loader()` 注入。
+如果 SOUL.md 无法解析成结构化对象，`PromptCompiler` 会退回直接使用原文，而不是强制失败。
 
 ---
 
-## 工作空间（`workspace.py`）
+## 运行时 `Agent`
 
-### ProfileWorkspace
+`Agent` 定义在 `idavoll/agent/registry.py`，是 dataclass。
 
-单个 Agent 的文件系统工作空间，目录结构：
+当前字段：
 
+- `profile`
+- `metadata`
+- `workspace`
+- `memory_store`
+- `memory`
+- `skills`
+- `tools`
+
+注意：
+
+- `session_search` 已不再挂在 `Agent` 顶层
+- session-scoped 能力现在通过 `Session.services` 获取
+- `metadata` 被产品层和 subagent runtime 用来保存运行时标记
+
+常见 `metadata` 用途：
+
+- `runtime_mode="subagent"`
+- `parent_agent_id`
+- `delegate_depth`
+- `review_role`
+- `memory_mode`
+
+---
+
+## `AgentRegistry`
+
+`AgentRegistry` 是内存中的运行时注册表。
+
+提供：
+
+- `register(profile)`
+- `get(agent_id)`
+- `get_or_raise(agent_id)`
+- `all()`
+- `delete(agent_id)`
+- `update(agent_id, updater)`
+- `unlock_toolset(agent_id, toolset_name)`
+
+其中 `unlock_toolset()` 会：
+
+1. 修改 `AgentProfile.enabled_toolsets`
+2. 重新从 `ToolsetManager` 解析 `agent.tools`
+
+`IdavollApp.unlock_toolset()` 在这之上再补了一层：
+
+- 重新注入 memory provider 贡献的 tools
+- 重新执行 `_bind_agent_tools()`
+
+---
+
+## 工作空间
+
+工作空间相关类型也都在 `profile.py`：
+
+- `ProfilePath`
+- `ProfileManager`
+
+目录结构：
+
+```text
+{base_dir}/{profile_id}/
+├── SOUL.md
+├── MEMORY.md
+├── USER.md
+└── skills/
 ```
-{profile_id}/
-  SOUL.md        ← 人格定义（Prompt 唯一真相来源）
-  MEMORY.md      ← 持久化事实（Session 启动时冻结注入）
-  USER.md        ← 用户画像（Session 启动时冻结注入）
-  PROJECT.md     ← 可选项目背景
-  skills/        ← 可复用技能（每个技能一个子目录）
-  SQLite `session_records` ← 历史 Session 原始记录（产品层持久化）
-```
 
-提供对上述所有文件的读写操作，以及 `read_soul_spec()` 直接返回解析后的 `SoulSpec`。
+职责分工：
 
-### ProfileWorkspaceManager
+- `ProfileManager` 管理目录创建、加载、删除
+- `ProfileManager.read_soul()` / `write_soul()` 负责 SOUL.md I/O
+- `MemoryStore` 负责 MEMORY.md / USER.md 的事实读写
+- `SkillsLibrary` 负责 `skills/` 目录
 
-管理所有 Agent 的工作空间根目录，提供：
+这也是为什么当前没有单独的 `workspace.py`：  
+文件系统布局和 Soul 渲染逻辑都已经收口在 `profile.py`。
 
-- `create(profile, soul)` → 创建新工作空间，写入初始 SOUL/MEMORY/USER 模板
-- `load(profile_id)` → 加载已有工作空间
-- `get_or_create(profile, soul)` → 幂等版本
-- `render_soul(profile, soul) -> str` → 将 SoulSpec 渲染为规范 SOUL.md 文本
+---
+
+## Agent 创建链路
+
+`IdavollApp.create_agent()` 当前流程：
+
+1. `extract_soul()` 从自然语言描述提取 `SoulSpec`
+2. 创建 `AgentProfile`
+3. `ProfileManager.get_or_create()` 落盘 workspace
+4. `AgentRegistry.register()` 创建运行时 Agent
+5. `_attach_runtime()` 注入 memory / skills / tools
+6. 触发 `agent.created`
+
+`load_agent()` 则是：
+
+1. 先查内存 registry
+2. 通过产品层提供的 `AgentLoader` 还原 `AgentProfile`
+3. 加载 workspace
+4. `_attach_runtime()`
+5. 触发 `agent.loaded`
 
 ---
 
 ## 设计原则
 
-- **Persona 与控制平面分离**：AgentProfile 不存储任何人格信息，SOUL.md 是唯一真相来源
-- **Workspace 即边界**：每个 Agent 的所有可变状态都在自己的 workspace 目录内
-- **创建即最终**：AgentProfile 创建后，id 不变，SOUL.md 可通过 `refine_soul` 迭代更新
+- `AgentProfile` 只放控制平面元数据
+- `SOUL.md` 是人格唯一真相来源
+- `Agent` 只保存长期 runtime 能力，不保存 session-scoped 服务
+- 工作空间是 Agent 的本地持久状态边界

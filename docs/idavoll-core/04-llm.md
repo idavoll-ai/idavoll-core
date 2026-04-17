@@ -1,66 +1,144 @@
-# LLM 模块
+# LLM
 
 ## 概述
 
-`idavoll/llm/` 是框架与 LLM 之间的薄适配层，将 LangChain 的类型边界封装在模块内，使框架其他部分只依赖原生 Python 类型（字符串、列表）。
+Idavoll Core 的 LLM 接入层很薄，核心类型只有两个：
+
+- `LLMConfig`
+- `LLMAdapter`
+
+原则是：
+
+- 外层 orchestration 用统一接口
+- LangChain 细节尽量收口在 `LLMAdapter`
+- tool calling 仍然复用底层 provider 的 function calling 能力
 
 ---
 
-## LLMAdapter（`adapter.py`）
+## `LLMConfig`
+
+`idavoll/config.py` 中的 `LLMConfig` 负责声明模型来源与构建方式。
+
+当前支持的 provider 枚举：
+
+- `anthropic`
+- `openai`
+- `deepseek`
+- `kimi`
+- `siliconflow`
+
+其中：
+
+- `anthropic` 直接构建 `ChatAnthropic`
+- 其余 provider 统一走 `ChatOpenAI` 兼容接口
+
+非 `anthropic` provider 必须显式配置 `base_url`。
+
+关键字段：
+
+- `provider`
+- `model`
+- `temperature`
+- `max_tokens`
+- `base_url`
+- `api_key`
+
+---
+
+## `LLMAdapter`
+
+`idavoll/llm/adapter.py` 目前只暴露 3 个主接口：
+
+- `invoke()`
+- `generate()`
+- `astream()`
+
+### `invoke()`
 
 ```python
-class LLMAdapter:
-    def __init__(self, model: BaseChatModel) -> None
+ai_message = await llm.invoke(messages, tools=callable_tools)
 ```
 
-包装任何 LangChain `BaseChatModel` 实例。
+特点：
 
-### generate()
+- 返回完整 `AIMessage`
+- 调用方可直接检查 `ai_message.tool_calls`
+- 这是 tool loop 的唯一入口
 
-标准对话调用，返回字符串：
+### `generate()`
 
 ```python
-async def generate(
-    self,
-    messages: list[BaseMessage],
-    callbacks: list | None = None,
-    run_name: str | None = None,
-    metadata: dict | None = None,
-    tags: list[str] | None = None,
-) -> str
+text = await llm.generate(messages)
 ```
 
-可选的 `callbacks`、`run_name`、`metadata`、`tags` 透传为 LangChain `RunnableConfig`，供 LangSmith 等观测插件挂载 tracing，无需修改框架内部代码。
+特点：
 
-### generate_with_tools()
+- 内部仍调用 `invoke()`
+- 只返回字符串内容
+- 适合不需要 tool_calls 的路径
 
-带工具绑定的调用，返回原始 `AIMessage`（含 `tool_calls` 字段）：
+### `astream()`
 
 ```python
-async def generate_with_tools(
-    self,
-    messages: list[BaseMessage],
-    tools: list[ToolSpec],
+async for token in llm.astream(messages, tools=callable_tools):
     ...
-) -> AIMessage
 ```
 
-每个 `ToolSpec` 被转换为 OpenAI function-calling schema 后通过 `model.bind_tools()` 绑定。`parameters` 为空的 ToolSpec 自动补全为 `{"type": "object", "properties": {}}`，确保 API 调用合规。
+特点：
 
-返回 `AIMessage` 而非字符串是刻意设计，让调用方（`IdavollApp.generate_response`）可以检查 `tool_calls` 并驱动工具执行循环。
+- 逐 chunk 返回文本
+- 若 provider 同时在流里返回 tool-call chunk，adapter 会跳过非文本内容
 
-### raw
+---
 
-逃生舱属性，直接返回底层 `BaseChatModel` 实例，供需要直接使用 LangChain 特性的场景使用：
+## 工具 schema 绑定
+
+`LLMAdapter` 会把 `ToolSpec` 转成 provider 可接受的 schema：
 
 ```python
-adapter.raw  # → BaseChatModel
+{
+  "type": "function",
+  "function": {
+    "name": spec.name,
+    "description": spec.description,
+    "parameters": spec.parameters,
+  }
+}
 ```
+
+也就是说，Core 的 tool registry 并不依赖特定厂商 SDK，只要求下游模型支持 LangChain 的 `bind_tools()`。
+
+---
+
+## 配置透传
+
+`LLMAdapter` 会统一组装可选调用配置：
+
+- `callbacks`
+- `run_name`
+- `metadata`
+- `tags`
+
+这样 Core / 产品层在不同路径里都能附带 tracing 元数据，而不用直接操作 LangChain model。
+
+---
+
+## 调用约束
+
+当前 `LLMAdapter` 不做这些事情：
+
+- 不做复杂 retry
+- 不做 provider fallback
+- 不做 prompt cache 管理
+- 不做 token accounting
+
+这些能力要么留给产品层，要么未来在更高层 orchestration 中实现。  
+当前目标是保持接口薄、可替换、容易测试。
 
 ---
 
 ## 设计原则
 
-- **隔离 LangChain 类型**：`BaseMessage`、`AIMessage` 等 LangChain 类型只在 LLMAdapter 内部出现，框架其他模块通过 TYPE_CHECKING 引用，不产生运行时依赖
-- **不做重试逻辑**：重试由 LangChain 模型本身或产品层处理，LLMAdapter 只负责一次调用的透传
-- **可观测性无侵入**：tracing / logging 通过标准 LangChain callback 机制注入，不污染 LLMAdapter 代码
+- Core 只依赖 `BaseChatModel`
+- orchestration 层用 `invoke / generate / astream`
+- tool calling 仍然是普通 LLM 调用的一部分，不引入额外 runtime

@@ -243,8 +243,10 @@ class ConsolidationService:
 
         # accept
         if kind == "memory_candidate":
-            if agent.memory is not None and final_content:
-                written = agent.memory.write_fact(final_content, target="memory")
+            if agent.memory_store is not None and final_content:
+                written = agent.memory_store.add_fact(final_content, "memory")
+                if written and agent.memory is not None:
+                    agent.memory.on_memory_write("add", "memory", final_content)
                 logger.info(
                     "ConsolidationService: agent %r accepted memory directive %d (written=%s)",
                     agent.id,

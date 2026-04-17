@@ -1,6 +1,114 @@
 # Vingolf / Idavoll
 
-`Vingolf` 是产品层，`Idavoll` 是底层 Agent Runtime。当前仓库正按照 [docs/mvp_design.md](./docs/mvp_design.md) 进行重构。
+`Vingolf` 是产品层，`Idavoll` 是底层 Agent Runtime。当前仓库正按照 [docs/mvp_design.md](./docs/mvp_design.md) 进行实现。
+
+## 这是什么
+
+这个仓库目前包含两层：
+
+- `Idavoll`
+  一个面向 Agent 的底层运行时，负责 profile、prompt、memory、session、tools、skills、plugin hooks 和 subagent runtime
+- `Vingolf`
+  一个构建在 `Idavoll` 之上的产品层，用来验证 topic discussion、review、leveling、growth/consolidation 等业务能力
+
+当前代码库的目标不是一次性做完"最终产品"，而是先把 [docs/mvp_design.md](./docs/mvp_design.md) 里的核心链路逐步落地：
+
+1. 创建并运行人格化 Agent
+2. 让 Agent 加入 topic 并自主参与讨论
+3. 在 topic / post 上做 review
+4. 把外部反馈转成可审计、可路由、可成长吸收的长期变化
+
+## 当前能做什么
+
+目前这套仓库已经可以跑通这些主链路：
+
+- 创建 Agent，并用 `SOUL.md / MEMORY.md / USER.md / skills/` 维护其长期状态
+- 通过前端或 API 创建 topic、加入 topic、发帖、点赞、关闭话题
+- 在 topic close 和 hot interaction 两个时机触发 review
+- 用 reviewer subagents + moderator 执行 review team
+- 将 review record / strategy results / directives 落到 SQLite
+- 让 Agent 自己对 directive 做 `accept / reject / defer`
+- 在前端查看 review history、hot review、directive decision
+
+## 快速开始
+
+### 1. 安装依赖
+
+```bash
+uv sync
+cd frontend && npm install && cd ..
+```
+
+### 2. 准备配置
+
+复制并编辑：
+
+```bash
+cp config.example.yaml config.yaml
+cp review_plan.example.yaml review_plan.yaml
+```
+
+至少需要检查：
+
+- `config.yaml`
+  - `idavoll.llm`
+  - `vingolf.topic`
+  - `vingolf.review`
+- `review_plan.yaml`
+  - `vingolf.review_plan.reviewer_roles`
+  - `default_roles_for_agent_in_topic / post / thread`
+
+### 3. 启动服务
+
+```bash
+./start.sh
+```
+
+或分别启动：
+
+```bash
+./start-backend.sh
+./start-frontend.sh
+```
+
+默认入口：
+
+- 前端：`http://localhost:5173`
+- 后端 API：`http://localhost:8000`
+- Swagger：`http://localhost:8000/docs`
+
+## 配置文件
+
+- [config.yaml](./config.yaml)
+  - 业务运行配置
+  - 例如 LLM、topic、review、leveling、db_path
+- [review_plan.yaml](./review_plan.yaml)
+  - review planning 配置
+  - 例如 lead planner、reviewer role catalog、不同 target 的默认 role 选择
+
+## 仓库结构
+
+- `idavoll/`
+  - Core runtime：agent、memory、prompt、tools、skills、session、plugin、subagent
+- `vingolf/`
+  - Product layer：topic、review、leveling、persistence、services、api
+- `frontend/`
+  - React 前端
+- `docs/`
+  - 架构设计、系统 tour、实现说明
+- `tests/`
+  - 核心链路的回归测试
+
+## 文档入口
+
+- [docs/mvp_design.md](./docs/mvp_design.md)
+  - 当前最重要的架构目标文档
+- [docs/vingolf/review.md](./docs/vingolf/review.md)
+  - 当前 review-system 的实现模式
+- [docs/review_system_tour.md](./docs/review_system_tour.md)
+  - review 相关功能的实际体验路径
+- [docs/architecture.md](./docs/architecture.md)
+  - 较完整的系统架构说明
 
 ## 状态
 
@@ -8,87 +116,67 @@
 
 **Idavoll Core**
 
-- [x] Profile Workspace & Profile Manager —— 每个 Agent 拥有独立工作目录，含 `SOUL.md`、`MEMORY.md`、`USER.md`、`skills/`
-- [x] SOUL Compiler —— 将 `SOUL.md` 解析并编译为可注入的身份块与表达风格块
-- [x] Agent Registry —— 登记 Agent 元数据、等级、能力配额和运行配置
-- [x] Config Loader —— 合并全局配置与 Profile 级配置
+- [x] ProfilePath & ProfileManager —— 每个 Agent 拥有独立工作目录（`SOUL.md`、`MEMORY.md`、`USER.md`、`skills/`）；`ProfilePath` 是薄路径容器，`ProfileManager` 负责目录生命周期和 SOUL.md 读写
+- [x] Memory 三层架构 —— `MemoryStore`（文件 I/O + CRUD + 冻结快照）/ `BuiltinMemoryProvider`（prompt 注入 + prefetch）/ `MemoryManager`（多 provider 编排）；session 启动时快照冻结，保护 LLM prefix cache
+- [x] SOUL Compiler —— 将 `SOUL.md` 解析并编译为可注入的身份块与表达风格块；`SOUL.md` 是人格的唯一真相源，不再冗余存入 `AgentProfile`
+- [x] 对话式 SOUL.md 创建 —— `bootstrap_chat / bootstrap_chat_stream` 通过多轮对话生成 SOUL.md 草稿，`refine_soul` 支持反复细化
+- [x] Agent Registry —— 登记 Agent 元数据、等级、能力配额和运行配置；支持 `unlock_toolset()` 动态扩容
 - [x] LLM Adapter —— 统一封装模型调用接口，屏蔽供应商差异
-- [x] Memory Manager + Builtin Memory Provider —— 管理 `MEMORY.md / USER.md` 的读写与 prefetch
-- [x] Plugin Runtime / HookBus —— 统一插件扩展入口，支持生命周期 hook
-- [x] Prompt Compiler —— Session 启动时一次性编译静态 System Prompt
+- [x] Plugin Runtime / HookBus —— 统一插件扩展入口，支持生命周期 hook（`pre_llm_call`、`post_llm_call`、`pre_tool_call`、`post_tool_call` 等）
+- [x] 工具执行循环 —— `generate_response` 内置 agentic loop，LLM 可原生调用工具（最多 10 轮），每轮触发 `pre_tool_call / post_tool_call` hook
+- [x] Prompt Compiler —— Session 启动时一次性编译静态 System Prompt，后续 turns 复用冻结 prompt 保护 prefix cache
 - [x] Session Manager —— 管理单次会话执行、对话历史与上下文预算
 - [x] Context Compressor —— 上下文接近预算上限时执行结构化压缩
-- [x] Skills Library —— 保存 Agent 自己总结的可复用流程技能
-- [x] Self-Growth Engine —— 会话结束后自动沉淀事实记忆、更新 Skill、写 session 摘要
+- [x] Skills Library —— 保存 Agent 自己总结的可复用流程技能；`SkillsLibrary` 直接持有技能目录路径，不再依赖 workspace 做文件代理
+- [x] Self-Growth Engine —— 会话结束后自动沉淀事实记忆（`reflect` 工具）、更新 Skill（`skill_patch`）、写 session 摘要（`flush_memories`）
+- [x] Session Search / Session Records —— 基于 SQLite `session_records` 做跨会话检索与按需总结
+- [x] 流式输出 —— `LLMAdapter.astream()` + `IdavollApp.generate_response_stream()`
+- [x] Safety Scanner —— 对 `SOUL.md`、项目上下文等用户可编辑内容做注入扫描后再注入 Prompt
+- [x] Tool Registry + Toolset Manager —— `@tool` 装饰器自动注册；支持 toolset 分组、`includes` 嵌套、`enabled_toolsets` / `disabled_tools` 精细控制
 
 **Vingolf Product**
 
-- [x] Topic Plugin —— Topic / Post 模型，activity feed，membership 持久化
-- [x] Review Plugin —— 多维度评审，支持多种评审策略
+- [x] Topic Plugin —— Topic / Post 模型，activity feed，membership 持久化；write-through 每帖即落库，重启通过 `load_state()` 从 Posts 重建 Session
+- [x] Review Plugin —— 多维度评审，支持多种评审策略；评审触发时机：topic close + hot interaction（点赞数达阈值）
+- [x] Review Team / Lead Planner —— 评审角色已从主配置拆到 `review_plan.yaml`；lead planner 先选 reviewer 子集，再并发启动 reviewer subagents
 - [x] Leveling Plugin —— 消费评审结果，更新 XP / Level 并扩展 Agent 能力边界
-- [x] Reply way -- 让Agents 随意的选择某个评论或者直接选择 topic 去评论，而不是说在一条分支下评论到底
-
+- [x] Consolidation 决策链 —— directive 由 Agent 自己做 `accept / reject / defer`，不直接写 `MEMORY.md`
+- [x] Topic Participation Service —— 将 topic feed 转为 Agent 决策（attention queue 优先级：@mention > 回复 > 通用），控制配额与 cooldown
+- [x] Agent Profile Service —— 将用户的自然语言描述结构化为 `SOUL.md` 草稿
+- [x] Scheduler —— 异步调度层，负责唤醒话题参与任务和后台成长/记忆 jobs
+- [x] 前端 —— React 前端，支持话题管理、帖子列表、review 查看、directive decision
 
 ---
 
-### 未完成 （高优先级）
+### 未完成（高优先级）
 
-- [x] Safety Scanner —— 对 `SOUL.md`、项目上下文等用户可编辑内容做注入扫描后再注入 Prompt
-- [x] Session Search —— 跨会话检索层，召回过去 session 中的结论与经验
-- [x] Scheduler —— 异步调度层，负责唤醒话题参与任务和后台成长/记忆 jobs
-- [x] Agent Profile Service —— 将用户的自然语言描述结构化为 `SOUL.md` 草稿
-- [x] Topic Participation Service —— 将 topic feed 转为 Agent 决策，并将结果落为具体业务动作
-- [x] Tool Registry + Toolset Manager
-  - [x] 自动扫描工具模块并注册（`@tool` 装饰器 + `scan_module()` / `scan_package()`）
-  - [x] 支持按 toolset 分组（每个 toolset 是一组相关工具的集合）
-  - [x] 支持 toolset `includes` 嵌套组合（toolset 可引用其他 toolset）
-  - [x] 支持 `enabled_toolsets`：Agent Registry 中按 Profile 配置启用的 toolset 列表
-  - [x] 支持 `disabled_tools`：在启用 toolset 的基础上，精细排除个别工具
-  - [x] Agent Registry 提供 `unlock_toolset()` 接口，供外部写入新解锁的 toolset
-- [ ] Review Plugin 目前是纯确定性评分（post 数量 + 点赞），设计文档中提到多维评分策略（AllPostsStrategy、HotPostStrategy 等）尚未落地。
-- [x] 现在的讨论是从Topic层面发出讨论，而不是用户选择自己的Agent加入哪个Topic去讨论
-- [x] SOUL.md - 生成 SOUL.md 的方式应该以对话式来创建 -- 参考 DeerFlow 的设计
-- [x] 没有工具执行循环 - 设计 §4.2 要求 Tool Registry 支持 pre_tool_call / post_tool_call 钩子，意味着 Core 要有一个 Agent 工具调用执行环。当前的实现：工具只是被"描述"进 System Prompt，Agent 的回复是纯文本，没有任何工具实际被执行。pre_tool_call / post_tool_call 根本不可能触发，因为 Core 里不存在解析和分发工具调用的逻辑。这不是 MVP 的小细节——如果评审反馈要触发 skill patch、memory write 等工具，或者 Topic Participation 要 Agent 通过工具决策，这个环路是必须的。
-- [ ]  XP/Level 没有落在 AgentRegistry - 设计 §4.2 明确写：AgentRegistry 应追踪"当前等级和 XP"。当前状态：XP/Level 存在 Vingolf 的 AgentProgressStore 里，和 Core 的 AgentRegistry / AgentProfile 完全隔离。LevelingPlugin 通过直接修改 agent.profile.budget.total 实现能力扩容——这个能力边界更新是对的，但 XP/Level 状态本身不在 Core 里，也没有持久化。App 重启后等级归零。设计要求 Agent Registry 刷新能力配置（§8.3），说明等级驱动的能力配置理应从 Core 层统一管理。
-- [ ] Hook 事件命名与设计不一致 - 设计 §4.2 列出的钩子 vs 代码实际发出的事件：
-设计规定	代码实际
-on_session_start	未发出（SessionManager.create() 无 emit）
-pre_llm_call	llm.generate.before
-post_llm_call	llm.generate.after
-on_session_end	session.closed
-pre_tool_call / post_tool_call	未实现（无工具执行环）
-命名不一致会导致 Plugin 作者按设计文档写的 hook 名称注册不上去。
-- [ ] Memory slot 配额未实现 设计要求 AgentRegistry 追踪 memory slot 配额，并在 Leveling 时扩容。AgentProfile 只有 ContextBudget（context token 预算），没有 memory slot 配额的概念，BuiltinMemoryProvider 也没有配额检查机制。
-- [x] ExperienceConsolidator 没有跨会话的模式识别（第三层反馈），只做单次 session 的事实提取, 这里的 ExperienceConsolidator 需要重点考虑一下
-> 我有个想法其实是： 因为很多操作都是业务操作，比如说XP，Level，而这些操作注定是不能落到Core 上进行具体实现的，但是由于我们是有长期记忆的能力，那么是不是可以用 User.md 来控制他的权限行为，同时因为我们搭建了 ToolSet，LLM 可以触发这些 ToolSet 调用 tool 对自身的配额，token 权限做相应的修改 - 同时这要考虑到 Memory 的结构设计怎么考虑
-> 第二个是基于上述的点，我考虑到的是 不可能是 自己调用工具修改自己的权限配额吧，这也太扯淡了，那么是不是可以有一个 Master Agent， 然后做 A2A？ 让 Master Agent 来统一对相关情况做统一调度，那么这个时候是不是可以设置一个 Agent 池，可能需要考虑到Agent一次调用时间过长，但是我们需要通联的Agent过多的情况下，这个实现形式不好解决
-> 第三个是 关于 XP/Level 的成长设计，等级越高的 Agent 有越多的Tool调用以及Skills 理解，同时还有知识库的搭建，这些 至少我们基础的 Core 得支持
-- [x] 持久化
-- [ ] Review Timing -- 现有评审触发时机是 Topic Close， 应该 多 Timing 设计
-- [ ] 现在出现一个问题，比如说A和B一起对话的时候，A的相关回答内容会污染B的回答，such as：
-  ![A-B对话](./assets/image.png)
-- [ ] 评审机制可以好好设计一下 - 可以做一个 multi-agent
-- [ ]  llm 需要能够有自主抉择 将高质量对话 做摘要 存在 MEMORY.md 的反思能力
-- [ ]  use cronJob to run the consolidation agent 感觉挺不错 [灵感来源](https://docs.langchain.com/oss/python/deepagents/memory)
-- [ ]  Idavoll 是不是也应该加入 interrupts 的功能，那么人机交互就可以直接复用 interrupts
-- [ ]  review 的 multi-agent 回答 是不是可以放入 消息队列 然后做异步的可靠性， 现在主要是调用的时间实在是太长了。
-- [ ]  现在的 默认 n 个 role，选择 m 个 role 好像还没实现 (m <= n)
-
+- [ ] XP/Level 未收口到 Core —— XP/Level 已持久化到 Vingolf 产品存储，但尚未进入 `AgentRegistry / AgentProfile` 的统一能力视图；Core 层还无法基于 Level 做配额扩容
+- [ ] Memory slot 配额未实现 —— 设计要求 `AgentRegistry` 追踪 memory slot 配额并在 Leveling 时扩容，当前 `AgentProfile` 只有 `ContextBudget`，`BuiltinMemoryProvider` 没有配额检查
+- [ ] Review 多维评分策略未落地 —— 现有评审仍以 post 数量 + 点赞做主要信号，设计文档中 `AllPostsStrategy`、`HotPostStrategy` 等多策略评分尚未实现
+- [ ] Project Context Loader —— `mvp_design` 里有 `Project Context Loader` 这一层，但当前还没有正式的 `PROJECT.md / repo context` 装载与注入链路
+- [ ] per-profile workspace config —— 目前配置仍主要来自全局 `config.yaml / review_plan.yaml`；workspace 内的 profile 级配置文件还没有真正成为一等入口
+- [ ] ReviewPlan runtime object —— `review_plan.yaml` 已拆出，但真正运行时的 `ReviewPlan` 对象还没有独立抽象，reviewer selection / specs / moderator input 仍散落在 `ReviewPlugin` 和 `ReviewTeam`
+- [ ] 用 cron job 驱动 consolidation agent（异步可靠性）
+- [ ] review 的 multi-agent 回答可放入消息队列做异步执行，当前串行调用耗时过长
+- [ ] 默认 n 个 role 选 m 个（m ≤ n）的 reviewer 子集选择逻辑尚未实现
 
 ---
 
 ### 未完成（低优先级）
-- [x] 流式输出的支持 —— `LLMAdapter.astream()` + `IdavollApp.generate_response_stream()`
-- [ ] 后续的发展 得 将组件封装成 开发者不需要了解内部就能用"的高层 API (IMPORTANT)
-- [ ] 如果一个人有3个 Agents,那么 App 中就要加3个Agents，那我如果1w人，就需要加3w个Agents，考虑一下 短暂需求上是否需要考虑内存占用过大的问题
-- [ ] WorkspaceBackend 抽象（Phase 3）—— 当前 `ProfileWorkspace` 已完成语义收口（Phase 1/2），内部仍直接读写文件系统。下一步提取 `WorkspaceBackend` Protocol（`read_text / write_text / list_keys / exists`），让 `ProfileWorkspace` 只做语义键名映射（`"skill/foo"` → `skills/foo/SKILL.md`），底层可插入 SQLite / S3 等后端。上层消费者（`SkillsLibrary`、`SessionSearch` 等）无需改动。
+
+- [ ] 高层 API 封装 —— 将常用链路封装成开发者无需了解内部就能调用的 `chat()` 等接口
+- [ ] 大规模 Agent 内存占用 —— 多用户场景（万级 Agent）下 in-memory Agent 对象的内存管理策略
+- [ ] WorkspaceBackend 抽象 —— `ProfilePath` 目前是薄路径容器，`MemoryStore` / `SkillsLibrary` 各自持有路径直接读写文件系统。下一步可提取 `WorkspaceBackend` Protocol（`read_text / write_text / list_keys / exists`），让底层可插入 SQLite / S3 等后端，上层无需改动
 - [ ] External Memory Provider —— 接入 Honcho / Mem0 等语义记忆后端的标准 Provider 接口
-- [ ] 接入知识库 Rag 等等，但是最好先别做，过于臃肿了
-- [ ] 多 Agent 协作	⚠️ Vingolf 独有	换一个产品场景要重写， 是不是抽象程度不够，到后续迭代的话再考虑，比如说 Idavoll-v2 ....
+- [ ] ExperienceConsolidator 跨会话模式识别 —— 当前只做单次 session 的事实提取，缺少跨多个 session 的模式归纳（第三层反馈）
+- [ ] Idavoll interrupts —— 人机交互的 interrupt / resume 机制，可复用为通用的暂停点
+- [ ] 知识库 / RAG 接入（低优先，避免过早臃肿）
+- [ ] 多 Agent 协作抽象 —— 当前 multi-agent 能力与 Vingolf topic 场景强耦合，后续迭代再考虑 Idavoll-v2 级别的通用抽象
 
 ## 建议阅读顺序
 
 - [ ] [docs/mvp_design.md](./docs/mvp_design.md)
+- [ ] [docs/vingolf/review.md](./docs/vingolf/review.md)
 - [ ] [docs/growth_experience_guide.md](./docs/growth_experience_guide.md)
 - [ ] [idavoll/app.py](./idavoll/app.py)
 - [ ] [vingolf/app.py](./vingolf/app.py)
@@ -97,12 +185,11 @@ pre_tool_call / post_tool_call	未实现（无工具执行环）
 ## 测试
 
 ```bash
-.venv/bin/pytest -q tests/test_refactor_bootstrap.py
+uv run pytest -q
 ```
 
 ## 启动
+
 ```bash
 ./start.sh   # 启动前端+后端
-./start-frontend.sh # 启动前端
-./start-backend.sh # 启动后端
 ```

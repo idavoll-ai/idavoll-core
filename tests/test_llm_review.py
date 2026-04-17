@@ -370,11 +370,11 @@ async def test_leveling_does_not_write_to_agent_memory(fake_llm, tmp_path) -> No
     )
     await app.let_agent_participate(topic.id, agent)
 
-    # Spy on write_fact *after* the agent is fully set up so the real
-    # memory object handles prompt compilation.  We only intercept writes.
+    # Spy on add_fact *after* the agent is fully set up so the real
+    # memory store handles prompt compilation.  We only intercept writes.
     spy = MagicMock(return_value=True)
-    if agent.memory is not None:
-        agent.memory.write_fact = spy
+    if agent.memory_store is not None:
+        agent.memory_store.add_fact = spy
 
     await app.close_topic(topic.id)
 

@@ -10,7 +10,7 @@ from .profile import (
     VoiceConfig,
 )
 from .registry import Agent, AgentRegistry
-from .workspace import ProfileWorkspace, ProfileWorkspaceManager
+from .profile import ProfilePath, ProfileManager
 
 __all__ = [
     "Agent",
@@ -22,8 +22,8 @@ __all__ = [
     "IdentityConfig",
     "parse_soul_markdown",
     "SoulParseError",
-    "ProfileWorkspace",
-    "ProfileWorkspaceManager",
+    "ProfilePath",
+    "ProfileManager",
     "SoulSpec",
     "VoiceConfig",
 ]

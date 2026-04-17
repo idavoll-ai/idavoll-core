@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Literal
 
+from .context import SessionServices
+
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
@@ -38,6 +40,7 @@ class Session:
         participants: list[Any],
         metadata: dict[str, Any] | None = None,
         max_context_messages: int = 20,
+        services: SessionServices | None = None,
     ) -> None:
         self.id = str(uuid.uuid4())
         self.participants = list(participants)
@@ -45,6 +48,7 @@ class Session:
         self.max_context_messages = max_context_messages
         self.messages: list[Message] = []
         self.state = SessionState.OPEN
+        self.services = services or SessionServices()
         # Frozen system prompts keyed by agent_id.
         # Populated lazily on the first turn for each agent and never
         # recompiled within the same session (§9.2 Frozen Snapshot 原则).

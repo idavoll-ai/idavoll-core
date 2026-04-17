@@ -120,17 +120,22 @@ class VingolfApp:
         @self._app.hooks.hook("agent.created")
         async def _on_agent_created(agent, **_) -> None:
             await self._agent_repo.save(agent.profile)  # type: ignore[union-attr]
-            self._attach_session_search(agent)
-
-        # Hook: attach SQLiteSessionSearch when an agent is loaded from DB
-        @self._app.hooks.hook("agent.loaded")
-        async def _on_agent_loaded(agent, **_) -> None:
-            self._attach_session_search(agent)
 
         # Hook: persist budget changes (level-up expands budget.total)
         @self._app.hooks.hook("agent.level_up")
         async def _on_level_up(agent, **_) -> None:
             await self._agent_repo.save(agent.profile)  # type: ignore[union-attr]
+
+        # Hook: session-scoped cross-session recall lives on Session.services
+        @self._app.hooks.hook("on_session_start")
+        async def _on_session_start(session, **_) -> None:
+            if self._session_repo is None:
+                return
+            session.services.session_search_factory = lambda agent_id: SQLiteSessionSearch(
+                self._session_repo,
+                agent_id=agent_id,
+                llm=self._app.llm,
+            )
 
         # Hook: persist raw session conversation to SQLite for all closed sessions
         @self._app.hooks.hook("on_session_end")
@@ -154,22 +159,12 @@ class VingolfApp:
                     self._app._attach_runtime(agent, workspace)
                 except FileNotFoundError:
                     pass  # workspace not on disk; agent metadata still usable
-                self._attach_session_search(agent)
 
         # Restore topic + leveling state
         if self.topic is not None:
             await self.topic.load_state()
         if self.leveling is not None:
             await self.leveling.load_state()
-
-    def _attach_session_search(self, agent) -> None:
-        """Replace the no-op SessionSearch with the SQLite-backed implementation."""
-        if self._session_repo is not None:
-            agent.session_search = SQLiteSessionSearch(
-                self._session_repo,
-                agent_id=agent.id,
-                llm=self._app.llm,
-            )
 
     async def _persist_session_record(self, session) -> None:
         """Upsert one raw closed-session transcript into SQLite."""

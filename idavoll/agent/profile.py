@@ -557,3 +557,243 @@ async def refine_soul_spec(
             return build_soul_from_extracted(name, "", {})
 
     return build_soul_from_extracted(name, "", extracted)
+
+
+# ---------------------------------------------------------------------------
+# Filesystem layout — ProfilePath & ProfileManager
+# ---------------------------------------------------------------------------
+
+from pathlib import Path  # noqa: E402  (kept together with the classes that use it)
+
+_SOUL_TEMPLATE = """\
+# {name}
+
+## Identity
+
+- **Role**: {role}
+- **Backstory**: {backstory}
+- **Goal**: {goal}
+
+## Voice
+
+- **Tone**: {tone}
+- **Language**: {language}
+- **Quirks**: {quirks}
+{examples_block}"""
+
+_MEMORY_TEMPLATE = """\
+# Memory
+
+<!-- Durable facts about the agent and its world.
+     Store: preferences, corrections, long-term conclusions.
+     Do NOT store: task logs, temporary TODOs, step-by-step reasoning. -->
+"""
+
+_USER_TEMPLATE = """\
+# User Profile
+
+<!-- Long-term user preferences, background, and interaction patterns.
+     Updated by the agent over time; frozen into system prompt at session start. -->
+"""
+
+
+class ProfilePath:
+    """Filesystem path container for a single Agent Profile.
+
+    Owns the directory layout constants and exposes convenience path
+    properties.  All file I/O is delegated to the appropriate service:
+
+    * SOUL.md      → ``ProfileManager`` (read_soul / write_soul)
+    * MEMORY.md    → ``MemoryStore``
+    * USER.md      → ``MemoryStore``
+    * skills/      → ``SkillsLibrary``
+
+    Directory layout::
+
+        {root}/
+          SOUL.md          = agent identity and voice
+          MEMORY.md        = durable facts (frozen at session start)
+          USER.md          = user profile (frozen at session start)
+          skills/          = reusable workflow skills
+    """
+
+    SOUL_FILE = "SOUL.md"
+    MEMORY_FILE = "MEMORY.md"
+    USER_FILE = "USER.md"
+    SKILLS_DIR = "skills"
+
+    def __init__(self, root: Path) -> None:
+        self._root = root
+
+    @property
+    def path(self) -> Path:
+        return self._root
+
+    @property
+    def soul_path(self) -> Path:
+        return self._root / self.SOUL_FILE
+
+    @property
+    def memory_path(self) -> Path:
+        return self._root / self.MEMORY_FILE
+
+    @property
+    def user_path(self) -> Path:
+        return self._root / self.USER_FILE
+
+    @property
+    def skills_path(self) -> Path:
+        return self._root / self.SKILLS_DIR
+
+    def __repr__(self) -> str:
+        return f"ProfilePath(root={self._root!r})"
+
+
+class ProfileManager:
+    """Creates, loads, and manages agent profile directories on disk.
+
+    All directories live under a single ``base_dir``::
+
+        {base_dir}/
+          {profile_id}/   ← one directory per agent
+            SOUL.md
+            MEMORY.md
+            USER.md
+            skills/
+    """
+
+    def __init__(self, base_dir: str | Path) -> None:
+        self._base = Path(base_dir)
+
+    @property
+    def base_dir(self) -> Path:
+        return self._base
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
+    def create(self, profile: AgentProfile, soul: SoulSpec) -> ProfilePath:
+        """Create a new profile directory and return its ``ProfilePath``.
+
+        Raises ``FileExistsError`` if the directory already exists.
+        """
+        ws_dir = self._base / profile.id
+        if ws_dir.exists():
+            raise FileExistsError(
+                f"Profile directory already exists for {profile.id!r}: {ws_dir}"
+            )
+        ws_dir.mkdir(parents=True, exist_ok=False)
+        (ws_dir / ProfilePath.SKILLS_DIR).mkdir()
+
+        self._write(ws_dir / ProfilePath.SOUL_FILE, self.render_soul(profile, soul))
+        self._write(ws_dir / ProfilePath.MEMORY_FILE, _MEMORY_TEMPLATE)
+        self._write(ws_dir / ProfilePath.USER_FILE, _USER_TEMPLATE)
+
+        return ProfilePath(ws_dir)
+
+    def load(self, profile_id: str) -> ProfilePath:
+        """Load an existing profile directory.
+
+        Raises ``FileNotFoundError`` if the directory does not exist.
+        """
+        ws_dir = self._base / profile_id
+        if not ws_dir.is_dir():
+            raise FileNotFoundError(
+                f"No profile directory found for {profile_id!r}: {ws_dir}"
+            )
+        return ProfilePath(ws_dir)
+
+    def get_or_create(self, profile: AgentProfile, soul: SoulSpec) -> ProfilePath:
+        """Return existing profile directory or create a new one."""
+        ws_dir = self._base / profile.id
+        if ws_dir.is_dir():
+            return ProfilePath(ws_dir)
+        return self.create(profile, soul)
+
+    def exists(self, profile_id: str) -> bool:
+        return (self._base / profile_id).is_dir()
+
+    def delete(self, profile_id: str) -> None:
+        """Remove the profile directory and all its contents."""
+        import shutil
+
+        ws_dir = self._base / profile_id
+        if ws_dir.is_dir():
+            shutil.rmtree(ws_dir)
+
+    # ------------------------------------------------------------------
+    # SOUL.md I/O
+    # ------------------------------------------------------------------
+
+    def read_soul(self, profile_id: str) -> str:
+        """Return the raw SOUL.md text for *profile_id*, or '' if absent."""
+        return self._read(self._base / profile_id / ProfilePath.SOUL_FILE)
+
+    def read_soul_spec(self, profile_id: str) -> SoulSpec:
+        """Parse SOUL.md into a structured SoulSpec."""
+        return parse_soul_markdown(self.read_soul(profile_id))
+
+    def write_soul(self, profile_id: str, content: str) -> None:
+        """Overwrite SOUL.md for *profile_id*."""
+        self._write(self._base / profile_id / ProfilePath.SOUL_FILE, content)
+
+    def write_soul_spec(self, profile_id: str, profile: AgentProfile, soul: SoulSpec) -> None:
+        """Render *soul* to markdown and write it as SOUL.md."""
+        self.write_soul(profile_id, self.render_soul(profile, soul))
+
+    # ------------------------------------------------------------------
+    # Internal file helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _read(path: Path) -> str:
+        if not path.exists():
+            return ""
+        return path.read_text(encoding="utf-8")
+
+    @staticmethod
+    def _write(path: Path, content: str) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+
+    # ------------------------------------------------------------------
+    # Rendering
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def render_soul(profile: AgentProfile, soul: SoulSpec) -> str:
+        identity = soul.identity
+        voice = soul.voice
+        quirks = "、".join(voice.quirks) if voice.quirks else "none"
+        examples_block = ProfileManager._render_examples_block(
+            profile.name, voice.example_messages
+        )
+        return _SOUL_TEMPLATE.format(
+            name=profile.name,
+            role=identity.role or profile.description or f"{profile.name} Agent",
+            backstory=identity.backstory or "Not yet defined.",
+            goal=identity.goal or "Respond consistently with this persona.",
+            tone=voice.tone,
+            language=voice.language,
+            quirks=quirks,
+            examples_block=examples_block,
+        )
+
+    @staticmethod
+    def _render_examples_block(name: str, examples: list[ExampleMessage]) -> str:
+        if not examples:
+            return ""
+
+        lines = ["", "## Examples", ""]
+        for idx, example in enumerate(examples, start=1):
+            lines.extend(
+                [
+                    f"### Example {idx}",
+                    "",
+                    f"- **Input**: {example.input}",
+                    f"- **Output**: {example.output}",
+                    "",
+                ]
+            )
+        return "\n".join(lines).rstrip()

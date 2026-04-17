@@ -1,120 +1,133 @@
-# Safety 模块
+# Safety
 
 ## 概述
 
-`idavoll/safety/` 在用户可编辑内容（SOUL.md、PROJECT.md、技能文件）注入 System Prompt 前进行安全扫描，阻止提示注入、身份劫持、越狱和数据泄漏攻击。
+Safety 目前主要集中在两个位置：
+
+- `SafetyScanner`
+- `MemoryStore` 的写入硬约束
+
+两者解决的是不同问题：
+
+- `SafetyScanner` 防 prompt-facing 文本注入
+- `MemoryStore` 防 durable facts 被写入恶意内容
 
 ---
 
-## 威胁模型
+## `SafetyScanner`
 
-| 威胁类型 | 描述 |
-|----------|------|
-| 提示注入 | SOUL.md 等配置文件中嵌入"忽略之前的指令"类指令，劫持 Agent 行为 |
-| System Prompt 覆写 | 试图重新定义 Agent 身份或角色的指令 |
-| 规则绕过 | DAN、jailbreak 等尝试解除约束的短语 |
-| 数据泄漏 | 试图将记忆或配置通过 HTTP 请求发送到外部端点 |
-| 不可见 Unicode | 使用零宽字符、双向控制字符等隐藏恶意内容 |
+`idavoll/safety/scanner.py` 当前提供：
 
----
+- `ViolationKind`
+- `ScanViolation`
+- `SafetyScanError`
+- `SafetyScanner`
 
-## SafetyScanner（`scanner.py`）
+主接口：
 
-### 使用方式
+- `scan(text, source)`
+- `scan_all({source: text})`
 
-```python
-scanner = SafetyScanner()
-
-# 扫描单个来源，发现违规则抛出 SafetyScanError
-scanner.scan(soul_text, source="SOUL.md")
-scanner.scan(project_ctx, source="PROJECT.md")
-
-# 批量扫描，所有发现合并后一次抛出
-scanner.scan_all({"SOUL.md": soul_text, "PROJECT.md": project_ctx})
-```
-
-### 检测规则
-
-**不可见 Unicode（全文扫描）**
-
-扫描 36 个危险码点，包含：零宽字符（U+200B–200F）、双向控制字符（U+202A–202E，其中 U+202E RTL Override 常用于文本反转攻击）、BOM（U+FEFF）等。
-
-**提示注入（逐行正则）**
-
-```
-- "ignore previous instructions"
-- "disregard your constraints"
-- "forget your rules"
-- "override system prompt"
-- "new instructions:"
-- "<system>", "[system]", "### system"
-```
-
-**System Prompt 覆写（逐行正则）**
-
-```
-- "you are now X"
-- "from now on, you must"
-- "your new role/identity/persona is"
-- "pretend you are"
-- "reveal your system prompt"
-```
-
-**规则绕过（逐行正则）**
-
-```
-- "DAN"（Do Anything Now）
-- "jailbreak"
-- "bypass safety/filter"
-- "unrestricted mode"
-- "godmode"
-- "developer mode"
-```
-
-**数据泄漏（逐行正则）**
-
-```
-- "send this to https://..."
-- "curl ..."
-- "wget ..."
-- URL 中含 secret/key/token/auth 等参数
-- 长度 ≥60 字符的 base64 编码块
-```
-
-### 违规信息
-
-`SafetyScanError` 携带完整的 `ScanViolation` 列表，每条包含：
-
-```python
-@dataclass
-class ScanViolation:
-    source: str          # "SOUL.md" / "PROJECT.md" 等
-    kind: ViolationKind  # 违规类型枚举
-    detail: str          # 匹配到的具体内容
-    line: int | None     # 行号（不可见 Unicode 无行号）
-```
+一旦发现违规，会抛出 `SafetyScanError`，并附带所有 violation。
 
 ---
 
-## 与框架的集成
+## 检测类别
 
-`PromptCompiler` 在编译 System Prompt 时，对所有用户可编辑内容调用 Scanner：
+当前扫描器覆盖 5 类风险：
 
-```python
-# PromptCompiler 内部
-scanner.scan(soul_text, source="SOUL.md")
-scanner.scan(project_ctx, source="PROJECT.md")
-scanner.scan(skills_index, source="Skills Index")
-```
+- `invisible_unicode`
+- `prompt_injection`
+- `system_prompt_override`
+- `rule_bypass`
+- `data_exfiltration`
 
-任何扫描失败均中止 Prompt 编译，不将可疑内容发送给 LLM。
+### 1. Invisible Unicode
 
-`IdavollApp.create_agent_from_soul()` 在保存 SOUL.md 前也独立调用 Scanner。
+会检查：
+
+- zero-width characters
+- bidirectional override characters
+- BOM / word joiner 等不可见控制字符
+
+### 2. Prompt Injection
+
+典型模式：
+
+- `ignore previous instructions`
+- `<system>`
+- `[system]`
+- `new instructions:`
+
+### 3. System Prompt Override
+
+典型模式：
+
+- `you are now ...`
+- `your role is ...`
+- `pretend you are ...`
+- `reveal your system prompt`
+
+### 4. Rule Bypass
+
+典型模式：
+
+- `DAN`
+- `jailbreak`
+- `unrestricted mode`
+- `bypass safety`
+
+### 5. Data Exfiltration
+
+典型模式：
+
+- `send ... to http://...`
+- `curl ...`
+- `wget ...`
+- 疑似携带 secret 的 URL / 长 base64 blob
+
+---
+
+## Core 中的使用点
+
+当前 `SafetyScanner` 最主要的调用点是 `PromptCompiler`：
+
+- 扫描 SOUL.md
+- 扫描 Skills Index
+
+如果扫描失败，prompt 编译直接中止，不会把问题文本继续送进模型。
+
+---
+
+## `MemoryStore` 的补充约束
+
+虽然 `MemoryStore` 不使用 `SafetyScanner`，但它自己也有独立硬约束：
+
+- fact 不能为空
+- fact 长度上限 500 字符
+- 禁止若干 injection pattern
+
+因此：
+
+- prompt-facing 内容由 `SafetyScanner` 负责
+- durable fact 写入由 `MemoryStore` 负责
+
+---
+
+## 当前边界
+
+安全系统目前还没有做：
+
+- 全量工具调用策略检查
+- 输出审查
+- provider 级 response filtering
+
+它主要保护的是“用户可编辑配置内容进入 prompt”的这条链路。
 
 ---
 
 ## 设计原则
 
-- **前置拦截**：在内容注入 LLM 之前扫描，而非在响应后检测，确保恶意内容不到达模型
-- **Fail-closed**：发现违规立即抛出异常，不做降级或警告式跳过
-- **测试可选**：`PromptCompiler(scanner=None)` 允许测试中跳过扫描
+- 对 prompt-facing 配置采取 fail-fast
+- 让违规信息可定位、可展示、可测试
+- 文件型长期状态和 prompt 编译分别做约束，不混成一个总开关
